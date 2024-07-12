@@ -6,12 +6,14 @@
 
 mod aptos;
 mod helpers;
+mod movefmt;
 mod revela;
 mod tool;
 
 use crate::common::types::CliTypedResult;
 use anyhow::{anyhow, Context, Result};
 pub use helpers::get_additional_binaries_dir;
+pub use movefmt::get_movefmt_path;
 pub use revela::get_revela_path;
 use self_update::{update::ReleaseUpdate, version::bump_is_greater, Status};
 pub use tool::UpdateTool;
