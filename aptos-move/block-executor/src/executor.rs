@@ -756,6 +756,7 @@ where
         shared_counter: &AtomicU32,
         shared_commit_state: &ExplicitSyncWrapper<BlockGasLimitProcessor<T>>,
         final_results: &ExplicitSyncWrapper<Vec<E::Output>>,
+        thread_id: &usize,
     ) -> Result<(), PanicOr<ParallelBlockExecutionError>> {
         // Make executor for each task. TODO: fast concurrent executor.
         let init_timer = VM_INIT_SECONDS.start_timer();
@@ -763,6 +764,8 @@ where
         drop(init_timer);
 
         let _timer = WORK_WITH_TASK_SECONDS.start_timer();
+
+        let thread_id = *thread_id;
         let mut scheduler_task = SchedulerTask::Retry;
 
         let drain_commit_queue = || -> Result<(), PanicError> {
@@ -801,6 +804,7 @@ where
 
             drain_commit_queue()?;
 
+
             scheduler_task = match scheduler_task {
                 SchedulerTask::ValidationTask(txn_idx, incarnation, wave) => {
                     let valid = Self::validate(txn_idx, last_input_output, versioned_cache)?;
@@ -817,7 +821,7 @@ where
                 SchedulerTask::ExecutionTask(
                     txn_idx,
                     incarnation,
-                    ExecutionTaskType::Execution,
+                    ExecutionTaskType::Execution(flag), // ATTENTION
                 ) => {
                     let needs_suffix_validation = Self::execute(
                         txn_idx,
@@ -903,10 +907,11 @@ where
 
         let last_input_output = TxnLastInputOutput::new(num_txns);
         let scheduler = Scheduler::new(num_txns);
+        let thread_ids: Vec<usize> = (0..concurrency_level).collect();
 
         let timer = RAYON_EXECUTION_SECONDS.start_timer();
         self.executor_thread_pool.scope(|s| {
-            for _ in 0..concurrency_level {
+            for i in &thread_ids {
                 s.spawn(|_| {
                     if let Err(err) = self.worker_loop(
                         env,
@@ -919,6 +924,7 @@ where
                         &shared_counter,
                         &shared_commit_state,
                         &final_results,
+                        i,
                     ) {
                         // If there are multiple errors, they all get logged:
                         // ModulePathReadWriteError and FatalVMError variant is logged at construction,

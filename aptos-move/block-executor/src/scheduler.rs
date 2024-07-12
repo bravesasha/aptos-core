@@ -70,12 +70,19 @@ pub enum DependencyResult {
     ExecutionHalted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutingFlag {
+    Started,
+    Committing,
+    Writing,
+}
+
 /// Two types of execution tasks: Execution and Wakeup.
 /// Execution is a normal execution task, Wakeup is a task that just wakes up a suspended execution.
 /// See explanations for the ExecutionStatus below.
 #[derive(Debug, Clone)]
 pub enum ExecutionTaskType {
-    Execution,
+    Execution(ExecutingFlag),
     Wakeup(DependencyCondvar),
 }
 
@@ -137,9 +144,12 @@ pub enum SchedulerTask {
 ///    ↓                finish_abort                                                         |
 /// Aborting(i) ---------------------------------------------------------> Ready(i+1)      ---
 ///
+
+
 #[derive(Debug)]
 enum ExecutionStatus {
-    Ready(Incarnation, ExecutionTaskType),
+    ReadyToExecute(Incarnation),
+    ReadyToWakeUp(Incarnation, DependencyCondvar),
     Executing(Incarnation, ExecutionTaskType),
     Suspended(Incarnation, DependencyCondvar),
     Executed(Incarnation),
@@ -155,16 +165,12 @@ impl PartialEq for ExecutionStatus {
         use ExecutionStatus::*;
         match (self, other) {
             (
-                &Ready(ref a, ExecutionTaskType::Execution),
-                &Ready(ref b, ExecutionTaskType::Execution),
+                &ReadyToExecute(ref a),
+                &ReadyToExecute(ref b),
             )
             | (
-                &Executing(ref a, ExecutionTaskType::Execution),
-                &Executing(ref b, ExecutionTaskType::Execution),
-            )
-            | (
-                &Ready(ref a, ExecutionTaskType::Wakeup(_)),
-                &Ready(ref b, ExecutionTaskType::Wakeup(_)),
+                &ReadyToWakeUp(ref a, _),
+                &ReadyToWakeUp(ref b, _),
             )
             | (
                 &Executing(ref a, ExecutionTaskType::Wakeup(_)),
@@ -174,6 +180,10 @@ impl PartialEq for ExecutionStatus {
             | (&Executed(ref a), &Executed(ref b))
             | (&Committed(ref a), &Committed(ref b))
             | (&Aborting(ref a), &Aborting(ref b)) => a == b,
+            (
+                &Executing(ref a, ExecutionTaskType::Execution(ref flag_a)),
+                &Executing(ref b, ExecutionTaskType::Execution(ref flag_b)),
+            ) => a == b && flag_a == flag_b,
             _ => false,
         }
     }
@@ -316,7 +326,7 @@ impl Scheduler {
             txn_status: (0..num_txns)
                 .map(|_| {
                     CachePadded::new((
-                        RwLock::new(ExecutionStatus::Ready(0, ExecutionTaskType::Execution)),
+                        RwLock::new(ExecutionStatus::ReadyToExecute(0)),
                         RwLock::new(ValidationStatus::new()),
                     ))
                 })
@@ -728,7 +738,7 @@ impl Scheduler {
         // Always replace the status.
         match std::mem::replace(&mut *status, ExecutionStatus::ExecutionHalted) {
             ExecutionStatus::Suspended(_, condvar)
-            | ExecutionStatus::Ready(_, ExecutionTaskType::Wakeup(condvar))
+            | ExecutionStatus::ReadyToWakeUp(_, condvar)
             | ExecutionStatus::Executing(_, ExecutionTaskType::Wakeup(condvar)) => {
                 // Condvar lock must always be taken inner-most.
                 let (lock, cvar) = &*condvar;
@@ -806,12 +816,18 @@ impl Scheduler {
         // However, it is likely an overkill (and overhead to actually upgrade),
         // while unlikely there would be much contention on a specific index lock.
         let mut status = self.txn_status[txn_idx as usize].0.write();
-        if let ExecutionStatus::Ready(incarnation, execution_task_type) = &*status {
-            let ret: (u32, ExecutionTaskType) = (*incarnation, (*execution_task_type).clone());
-            *status = ExecutionStatus::Executing(*incarnation, (*execution_task_type).clone());
-            Some(ret)
-        } else {
-            None
+        match &*status {
+            ExecutionStatus::ReadyToWakeUp(incarnation, condvar) =>  {
+                let ret: (u32, ExecutionTaskType) = (*incarnation, ExecutionTaskType::Wakeup(condvar.clone()));
+                *status = ExecutionStatus::Executing(*incarnation, ExecutionTaskType::Wakeup(condvar.clone()));
+                Some(ret)
+            },
+            ExecutionStatus::ReadyToExecute(incarnation) => {
+                let ret: (u32, ExecutionTaskType) = (*incarnation, ExecutionTaskType::Execution(ExecutingFlag::Started));
+                *status = ExecutionStatus::Executing(*incarnation, ExecutionTaskType::Execution(ExecutingFlag::Started));
+                Some(ret)
+            },
+            _ => None
         }
     }
 
@@ -847,9 +863,10 @@ impl Scheduler {
         let status = self.txn_status[txn_idx as usize].0.read();
         matches!(
             *status,
-            ExecutionStatus::Ready(0, _)
+            ExecutionStatus::ReadyToExecute(0)
                 | ExecutionStatus::Executing(0, _)
                 | ExecutionStatus::Suspended(0, _)
+                | ExecutionStatus::ReadyToWakeUp(0, _)
         )
     }
 
@@ -944,9 +961,9 @@ impl Scheduler {
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match &*status {
             ExecutionStatus::Suspended(incarnation, dep_condvar) => {
-                *status = ExecutionStatus::Ready(
+                *status = ExecutionStatus::ReadyToWakeUp(
                     *incarnation,
-                    ExecutionTaskType::Wakeup(dep_condvar.clone()),
+                    dep_condvar.clone(),
                 );
                 Ok(())
             },
@@ -993,7 +1010,7 @@ impl Scheduler {
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match *status {
             ExecutionStatus::Aborting(stored_incarnation) if stored_incarnation == incarnation => {
-                *status = ExecutionStatus::Ready(incarnation + 1, ExecutionTaskType::Execution);
+                *status = ExecutionStatus::ReadyToExecute(incarnation + 1);
                 Ok(())
             },
             ExecutionStatus::ExecutionHalted => {
