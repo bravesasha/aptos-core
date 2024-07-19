@@ -57,8 +57,11 @@ build {
   provisioner "shell" {
     inline = [
       "whoami",
+      "sudo apt update",
+      "sudo apt install -y \\",
+      "  libudev-dev",
       "chmod +x /tmp/scripts/dev_setup.sh",
-      "sudo -u runner /tmp/scripts/dev_setup.sh -b -k",
+      "sudo -u runner /tmp/scripts/dev_setup.sh -b -r -y -P -J -t -k",
     ]
   }
 }
