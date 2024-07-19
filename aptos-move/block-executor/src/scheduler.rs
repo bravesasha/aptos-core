@@ -173,21 +173,21 @@ enum ExecutionStatus {
 /// incarnation (if applicable). Whether the transaction itself requires further validation
 /// is determined by factors such as ExecutionFlag - e.g. a fallback execution that starts
 /// after the prefix is committed never needs to be re-validated.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub(crate) enum ValidationMode {
     None,
     SelfOnly,
-    SuffixAfterSelf,
-    SuffixFromSelf,
+    SuffixOnly,
+    SuffixAndSelf,
 }
 
 impl ValidationMode {
-    fn add_suffix(self) -> Self {
+    pub(crate) fn add_suffix(self) -> Self {
         match self {
-            None => SuffixAfterSelf,
-            SelfOnly => SuffixFromSelf,
-            SuffixAfterSelf => SuffixAfterSelf,
-            SuffixFromSelf => SuffixFromSelf,
+            ValidationMode::None => ValidationMode::SuffixOnly,
+            ValidationMode::SelfOnly => ValidationMode::SuffixAndSelf,
+            ValidationMode::SuffixAndSelf => ValidationMode::SuffixAndSelf,
+            ValidationMode::SuffixOnly => ValidationMode::SuffixOnly,
         }
     }
 }
@@ -575,7 +575,7 @@ impl Scheduler {
         if cur_val_idx > txn_idx {
             if matches!(
                 validation_mode,
-                ValidationMode::SuffixFromSelf | ValidationMode::SuffixAfterSelf
+                ValidationMode::SuffixOnly | ValidationMode::SuffixAndSelf
             ) {
                 // The transaction execution required revalidating all higher txns (not
                 // only itself), currently happens when incarnation writes to a new path
@@ -587,7 +587,7 @@ impl Scheduler {
 
             if matches!(
                 validation_mode,
-                ValidationMode::SelfOnly | ValidationMode::SuffixFromSelf
+                ValidationMode::SelfOnly | ValidationMode::SuffixAndSelf
             ) {
                 // Update the minimum wave this txn needs to pass.
                 validation_status.required_wave = cur_wave;
@@ -631,12 +631,19 @@ impl Scheduler {
                 },
                 ExecutingFlag::Writing => None,
             },
-            ExecutionStatus::Suspended(_, _) => {
-                // All dependencies should be committed (caller invariant)
-                unreachable!("May not be suspended");
+            ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
+            ExecutionStatus::Aborting(_) => {
+                // All dependencies should be committed (caller invariant), can not be suspended
+                // neither can it be aborted, since we know that it can not fail validation
+                // Since we are inside fallback, status can not go back to ReadyToExecute
+                //  
+                unreachable!("May not be suspended, Aborting or ReadyToExecute");
             },
-            // TODO: List all patterns
-            _ => None,
+            ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | 
+            ExecutionStatus::ExecutionHalted => {
+                // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
+                None
+            }
         }
     }
 
@@ -646,9 +653,9 @@ impl Scheduler {
         &self,
         txn_idx: TxnIndex,
         maybe_validation_f: Option<F>,
-    ) -> Option<bool>
+    ) -> Result<Option<bool>, PanicError>
     where
-        F: Fn() -> bool,
+        F: Fn() -> Result<bool,PanicError>
     {
         let mut status: parking_lot::lock_api::RwLockWriteGuard<
             parking_lot::RawRwLock,
@@ -661,32 +668,45 @@ impl Scheduler {
                     | ExecutionStatus::ReadyToWakeUp(_, _, ref mut flag) => match flag {
                         ExecutingFlag::Main => {
                             *flag = ExecutingFlag::Writing;
-                            Some(false)
+                            Ok(Some(false))
                         },
                         ExecutingFlag::Fallback => {
                             drop(status);
-                            if validation_f() {
+                            if validation_f()? {
                                 let mut status = self.txn_status[txn_idx as usize].0.write();
-                                self.try_set_writing_from_fallback(&mut status)
+                                Ok(self.try_set_writing_from_fallback(&mut status))
                             } else {
-                                None
+                                Ok(None)
                             }
                         },
-                        ExecutingFlag::Writing => None,
+                        ExecutingFlag::Writing => Ok(None),
                     },
-                    ExecutionStatus::Suspended(_, _) => {
-                        // All dependencies should be committed (caller invariant)
-                        unreachable!("May not be suspended");
+                    ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
+                    ExecutionStatus::Aborting(_) => {
+                        // This function is called either by transaction which is ready to be written => can not be suspended
+                        // or transaction after commited one => All dependencies should be committed 
+                        // which starts from Executed/ReadyToWakeUp status, hence the original (main) transaction should never 
+                        // get suspended once it is fallback is called
+                        // for the same reason it can not be ReadyToExecute or Aborting
+                        unreachable!("May not be Suspended, Aborting or ReadyToExecute");
                     },
-                    // TODO: List all patterns
-                    _ => None,
+                    ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | ExecutionStatus::ExecutionHalted => {
+                        // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
+                        Ok(None)
+                    }
                 }
             },
-            None => self.try_set_writing_from_fallback(&mut status),
+            None => {
+                // Already inside fallback, no need to revalidate
+                Ok(self.try_set_writing_from_fallback(&mut status))
+            }    
         }
     }
 
-    // TODO: add description (caller invariant)
+    // the function is called by transaction after commmitted one.
+    // In case transaction is already being executed 
+    // or is ready to be executed after getting back from susspend to ReadyToWakeUp 
+    // we try to set flag from Main to Fallback, to signal that transaction is candidate for a next commit
     pub(crate) fn try_fallback(&self, txn_idx: TxnIndex) -> Option<Incarnation> {
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match &mut *status {
@@ -702,11 +722,18 @@ impl Scheduler {
                 Some(*incarnation)
             },
             ExecutionStatus::Suspended(_, _) => {
-                // All dependencies should be committed (caller invariant)
+                // All dependencies should be committed 
+                // => transaction could move from Suspended to ReadyToWakeUp => Executing => Executed => Aborting/Committed
+                // or finally execution should be halted, but it should never be suspended
                 unreachable!("May not be suspended");
             },
-            // TODO: List all patterns
-            _ => None,
+            ExecutionStatus::Aborting(_) | ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) |
+            ExecutionStatus::ReadyToExecute(_) | ExecutionStatus::ExecutionHalted => {
+                // if execution is halted, or transaction already committed/executed no need to fallback
+                // otherwise we know that transaction will be eventually executed
+                // => no need to fallback either
+                None
+            }
         }
     }
 

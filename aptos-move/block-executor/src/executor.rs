@@ -105,6 +105,7 @@ where
         idx_to_execute: TxnIndex,
         incarnation: Incarnation,
         fallback: bool,
+        scheduler: &Scheduler,
         signature_verified_block: &[T],
         last_input_output: &TxnLastInputOutput<T, E::Output, E::Error>,
         versioned_cache: &MVHashMap<T::Key, T::Tag, T::Value, X, T::Identifier>,
@@ -129,8 +130,6 @@ where
 
         let mut read_set = sync_view.take_parallel_reads();
 
-        // TODO:
-        // let mut ret_mode = if scheduler.try_set_execution_flag_writing?(idx_to_execute) {
         // NOTE: when passing lambda, it should do full validation (including delayed fields),
         // the same way it is currently done in prepare_and_queue_commit_ready.. (validate_commit_ready).
         // When we have None (or possibly SuffixAfterSelf returned), prepare_and_queue can also
@@ -139,6 +138,26 @@ where
         // } else {
         // ValidationMode::SelfOnly
         // };
+
+        let validation_function = if fallback {
+            None
+        } else {
+            Some(|| -> Result<bool,PanicError> {  
+                Self::validate(idx_to_execute, last_input_output, versioned_cache)
+            })
+        };
+
+        let mut ret_mode = if let Some(needs_validation) = 
+            scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function)? {
+            if needs_validation {
+                ValidationMode::SelfOnly
+            } else {
+                ValidationMode::None
+            }
+        } else {
+            return Ok(None);
+        }; 
+    
 
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
@@ -153,7 +172,7 @@ where
             {
                 if prev_modified_keys.remove(&group_key).is_none() {
                     // Previously no write to the group at all.
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
 
                 if versioned_cache.data().write_metadata(
@@ -162,7 +181,7 @@ where
                     incarnation,
                     group_metadata_op,
                 ) {
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
                 if versioned_cache.group_data().write(
                     group_key,
@@ -170,7 +189,7 @@ where
                     incarnation,
                     group_ops.into_iter(),
                 ) {
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
             }
 
@@ -184,7 +203,7 @@ where
                     .map(|(state_key, write_op)| (state_key, Arc::new(write_op), None)),
             ) {
                 if prev_modified_keys.remove(&k).is_none() {
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
                 versioned_cache
                     .data()
@@ -193,7 +212,7 @@ where
 
             for (k, v) in output.module_write_set().into_iter() {
                 if prev_modified_keys.remove(&k).is_none() {
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
                 versioned_cache.modules().write(k, idx_to_execute, v);
             }
@@ -201,7 +220,7 @@ where
             // Then, apply deltas.
             for (k, d) in output.aggregator_v1_delta_set().into_iter() {
                 if prev_modified_keys.remove(&k).is_none() {
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
                 }
                 versioned_cache.data().add_delta(k, idx_to_execute, d);
             }
@@ -307,7 +326,7 @@ where
                     // triggering suffix re-validation, a later transaction might
                     // end up with the incorrect read result (corresponding to the
                     // removed group information from an incorrect speculative state).
-                    ret_mode.add_suffix();
+                    ret_mode = ret_mode.add_suffix();
 
                     versioned_cache.data().remove(&k, idx_to_execute);
                     versioned_cache.group_data().remove(&k, idx_to_execute);
@@ -328,7 +347,7 @@ where
             ));
         }
 
-        Ok(ret_mode)
+        Ok(Some(ret_mode))
     }
 
     fn validate(
@@ -494,9 +513,11 @@ where
                 // are executing immediately, and will reduce it unconditionally
                 // after execution, inside finish_execution_during_commit.
                 // Because of that, we can also ignore _needs_suffix_validation result.
-                let _needs_suffix_validation = Self::execute(
+                let _validation_mode = Self::execute(
                     txn_idx,
                     incarnation + 1,
+                    false,
+                    scheduler,
                     block,
                     last_input_output,
                     versioned_cache,
@@ -509,8 +530,6 @@ where
                         shared_counter,
                     ),
                 )?;
-
-                scheduler.finish_execution_during_commit(txn_idx)?;
 
                 let validation_result =
                     Self::validate(txn_idx, last_input_output, versioned_cache)?;
@@ -827,6 +846,7 @@ where
                         last_commit_idx,
                         incarnation,
                         true,
+                        scheduler,
                         block,
                         last_input_output,
                         versioned_cache,
@@ -839,6 +859,7 @@ where
                             shared_counter,
                         ),
                     )? {
+                        //if we are in fallback and won write no need to validate
                         scheduler.finish_execution(
                             last_commit_idx,
                             incarnation,
@@ -872,6 +893,7 @@ where
                         txn_idx,
                         incarnation,
                         false,
+                        scheduler,
                         block,
                         last_input_output,
                         versioned_cache,
@@ -885,6 +907,8 @@ where
                         ),
                     )? {
                         scheduler.finish_execution(txn_idx, incarnation, validation_mode)?
+                    } else {
+                        SchedulerTask::Retry
                     }
                 },
                 SchedulerTask::ExecutionTask(_, _, ExecutionTaskType::Wakeup(condvar)) => {
