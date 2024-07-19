@@ -531,6 +531,8 @@ where
                     ),
                 )?;
 
+                scheduler.finish_execution_during_commit(txn_idx)?;
+
                 let validation_result =
                     Self::validate(txn_idx, last_input_output, versioned_cache)?;
                 if !validation_result
