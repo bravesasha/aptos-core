@@ -147,12 +147,12 @@ where
             })
         };
 
-        let mut ret_mode = if let Some(needs_validation) = 
+        let mut ret_mode = if let Some(is_validated) = 
             scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function)? {
-            if needs_validation {
-                ValidationMode::SelfOnly
-            } else {
+            if is_validated {
                 ValidationMode::None
+            } else {
+                ValidationMode::SelfOnly
             }
         } else {
             return Ok(None);
@@ -842,8 +842,8 @@ where
                 scheduler.queueing_commits_mark_done();
             }
 
-            if let Some(last_commit_idx) = last_commit_idx {
-                if let Some(incarnation) = scheduler.try_fallback(last_commit_idx) {
+            /*if let Some(last_commit_idx) = last_commit_idx {
+                if let Some(incarnation) = scheduler.try_fallback(last_commit_idx+1) {
                     if let Some(validation_mode) = Self::execute(
                         last_commit_idx,
                         incarnation,
@@ -869,7 +869,7 @@ where
                         )?;
                     }
                 }
-            }
+            } */
 
             drain_commit_queue()?;
 

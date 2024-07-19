@@ -708,6 +708,10 @@ impl Scheduler {
     // or is ready to be executed after getting back from susspend to ReadyToWakeUp 
     // we try to set flag from Main to Fallback, to signal that transaction is candidate for a next commit
     pub(crate) fn try_fallback(&self, txn_idx: TxnIndex) -> Option<Incarnation> {
+        if txn_idx >= self.num_txns {
+            return None;
+        }
+
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match &mut *status {
             ExecutionStatus::Executing(incarnation, _, ref mut flag)
