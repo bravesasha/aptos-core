@@ -12,7 +12,9 @@ use crate::{
     executor_utilities::*,
     explicit_sync_wrapper::ExplicitSyncWrapper,
     limit_processor::BlockGasLimitProcessor,
-    scheduler::{DependencyStatus, ExecutionTaskType, Scheduler, SchedulerTask, Wave},
+    scheduler::{
+        DependencyStatus, ExecutionTaskType, Scheduler, SchedulerTask, ValidationMode, Wave,
+    },
     task::{ExecutionStatus, ExecutorTask, TransactionOutput},
     txn_commit_hook::TransactionCommitHook,
     txn_last_input_output::{KeyKind, TxnLastInputOutput},
@@ -61,14 +63,6 @@ use std::{
         Arc,
     },
 };
-
-/// TODO: validation preference
-#[derive(Debug, Eq, PartialEq)]
-enum ValidationMode {
-    None, 
-    SelfOnly, 
-    Suffix,
-}
 
 pub struct BlockExecutor<T, E, S, L, X> {
     // Number of active concurrent tasks, corresponding to the maximum number of rayon
@@ -135,12 +129,21 @@ where
 
         let mut read_set = sync_view.take_parallel_reads();
 
+        // TODO:
+        // let mut ret_mode = if scheduler.try_set_execution_flag_writing?(idx_to_execute) {
+        // NOTE: when passing lambda, it should do full validation (including delayed fields),
+        // the same way it is currently done in prepare_and_queue_commit_ready.. (validate_commit_ready).
+        // When we have None (or possibly SuffixAfterSelf returned), prepare_and_queue can also
+        // skip the extra validation step!!!
+        // ValidationMode::None
+        // } else {
+        // ValidationMode::SelfOnly
+        // };
 
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
         // set (vanilla Block-STM rule), or if resource group size or metadata changed from an estimate
         // (since those resource group validations rely on estimates).
-        let mut needs_suffix_validation = false;
         let mut apply_updates = |output: &E::Output| -> Result<
             Vec<(T::Key, Arc<T::Value>, Option<Arc<MoveTypeLayout>>)>, // Cached resource writes
             PanicError,
@@ -150,7 +153,7 @@ where
             {
                 if prev_modified_keys.remove(&group_key).is_none() {
                     // Previously no write to the group at all.
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
 
                 if versioned_cache.data().write_metadata(
@@ -159,7 +162,7 @@ where
                     incarnation,
                     group_metadata_op,
                 ) {
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
                 if versioned_cache.group_data().write(
                     group_key,
@@ -167,7 +170,7 @@ where
                     incarnation,
                     group_ops.into_iter(),
                 ) {
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
             }
 
@@ -181,7 +184,7 @@ where
                     .map(|(state_key, write_op)| (state_key, Arc::new(write_op), None)),
             ) {
                 if prev_modified_keys.remove(&k).is_none() {
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
                 versioned_cache
                     .data()
@@ -190,7 +193,7 @@ where
 
             for (k, v) in output.module_write_set().into_iter() {
                 if prev_modified_keys.remove(&k).is_none() {
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
                 versioned_cache.modules().write(k, idx_to_execute, v);
             }
@@ -198,7 +201,7 @@ where
             // Then, apply deltas.
             for (k, d) in output.aggregator_v1_delta_set().into_iter() {
                 if prev_modified_keys.remove(&k).is_none() {
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
                 }
                 versioned_cache.data().add_delta(k, idx_to_execute, d);
             }
@@ -222,7 +225,7 @@ where
 
                 let entry = change.into_entry_no_additional_history();
 
-                // TODO[agg_v2](optimize): figure out if it is useful for change to update needs_suffix_validation
+                // TODO[agg_v2](optimize): figure out if it is useful for change to add_suffix
                 if let Err(e) =
                     versioned_cache
                         .delayed_fields()
@@ -304,7 +307,7 @@ where
                     // triggering suffix re-validation, a later transaction might
                     // end up with the incorrect read result (corresponding to the
                     // removed group information from an incorrect speculative state).
-                    needs_suffix_validation = true;
+                    ret_mode.add_suffix();
 
                     versioned_cache.data().remove(&k, idx_to_execute);
                     versioned_cache.group_data().remove(&k, idx_to_execute);
@@ -324,7 +327,8 @@ where
                 ParallelBlockExecutionError::ModulePathReadWriteError,
             ));
         }
-        Ok(needs_suffix_validation)
+
+        Ok(ret_mode)
     }
 
     fn validate(
@@ -481,6 +485,7 @@ where
 
         while let Some((txn_idx, incarnation)) = scheduler.try_commit() {
             last_commit_idx = Some(txn_idx);
+            // TODO: we can skip this one too.
             if !Self::validate_commit_ready(txn_idx, versioned_cache, last_input_output)? {
                 // Transaction needs to be re-executed, one final time.
 
@@ -832,14 +837,18 @@ where
                             scheduler,
                             start_shared_counter,
                             shared_counter,
-                        ))? {
-                            scheduler.finish_execution(last_commit_idx, incarnation, validation_mode)?;  
-                        }
+                        ),
+                    )? {
+                        scheduler.finish_execution(
+                            last_commit_idx,
+                            incarnation,
+                            validation_mode,
+                        )?;
+                    }
                 }
             }
 
             drain_commit_queue()?;
-
 
             scheduler_task = match scheduler_task {
                 SchedulerTask::ValidationTask(txn_idx, incarnation, wave) => {
