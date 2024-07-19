@@ -62,6 +62,14 @@ use std::{
     },
 };
 
+/// TODO: validation preference
+#[derive(Debug, Eq, PartialEq)]
+enum ValidationMode {
+    None, 
+    SelfOnly, 
+    Suffix,
+}
+
 pub struct BlockExecutor<T, E, S, L, X> {
     // Number of active concurrent tasks, corresponding to the maximum number of rayon
     // threads that may be concurrently participating in parallel execution.
@@ -102,13 +110,14 @@ where
     fn execute(
         idx_to_execute: TxnIndex,
         incarnation: Incarnation,
+        fallback: bool,
         signature_verified_block: &[T],
         last_input_output: &TxnLastInputOutput<T, E::Output, E::Error>,
         versioned_cache: &MVHashMap<T::Key, T::Tag, T::Value, X, T::Identifier>,
         executor: &E,
         base_view: &S,
         parallel_state: ParallelState<T, X>,
-    ) -> Result<bool, PanicOr<ParallelBlockExecutionError>> {
+    ) -> Result<Option<ValidationMode>, PanicOr<ParallelBlockExecutionError>> {
         let _timer = TASK_EXECUTE_SECONDS.start_timer();
         let txn = &signature_verified_block[idx_to_execute as usize];
 
@@ -125,6 +134,7 @@ where
             .map_or(HashSet::new(), |keys| keys.collect());
 
         let mut read_set = sync_view.take_parallel_reads();
+
 
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
@@ -464,10 +474,13 @@ where
         shared_counter: &AtomicU32,
         executor: &E,
         block: &[T],
-    ) -> Result<(), PanicOr<ParallelBlockExecutionError>> {
+    ) -> Result<Option<u32>, PanicOr<ParallelBlockExecutionError>> {
         let mut block_limit_processor = shared_commit_state.acquire();
 
+        let mut last_commit_idx: Option<u32> = None;
+
         while let Some((txn_idx, incarnation)) = scheduler.try_commit() {
+            last_commit_idx = Some(txn_idx);
             if !Self::validate_commit_ready(txn_idx, versioned_cache, last_input_output)? {
                 // Transaction needs to be re-executed, one final time.
 
@@ -601,10 +614,10 @@ where
                     )
                     .into()));
                 }
-                return Ok(());
+                return Ok(None);
             }
         }
-        Ok(())
+        Ok(last_commit_idx)
     }
 
     fn materialize_aggregator_v1_delta_writes(
@@ -756,7 +769,6 @@ where
         shared_counter: &AtomicU32,
         shared_commit_state: &ExplicitSyncWrapper<BlockGasLimitProcessor<T>>,
         final_results: &ExplicitSyncWrapper<Vec<E::Output>>,
-        thread_id: &usize,
     ) -> Result<(), PanicOr<ParallelBlockExecutionError>> {
         // Make executor for each task. TODO: fast concurrent executor.
         let init_timer = VM_INIT_SECONDS.start_timer();
@@ -765,7 +777,6 @@ where
 
         let _timer = WORK_WITH_TASK_SECONDS.start_timer();
 
-        let thread_id = *thread_id;
         let mut scheduler_task = SchedulerTask::Retry;
 
         let drain_commit_queue = || -> Result<(), PanicError> {
@@ -785,8 +796,9 @@ where
         };
 
         loop {
+            let mut last_commit_idx = None;
             while scheduler.should_coordinate_commits() {
-                self.prepare_and_queue_commit_ready_txns(
+                if let Some(last_idx) = self.prepare_and_queue_commit_ready_txns(
                     &self.config.onchain.block_gas_limit_type,
                     scheduler,
                     versioned_cache,
@@ -798,8 +810,32 @@ where
                     shared_counter,
                     &executor,
                     block,
-                )?;
+                )? {
+                    last_commit_idx.replace(last_idx);
+                };
                 scheduler.queueing_commits_mark_done();
+            }
+
+            if let Some(last_commit_idx) = last_commit_idx {
+                if let Some(incarnation) = scheduler.try_fallback(last_commit_idx) {
+                    if let Some(validation_mode) = Self::execute(
+                        last_commit_idx,
+                        incarnation,
+                        true,
+                        block,
+                        last_input_output,
+                        versioned_cache,
+                        &executor,
+                        base_view,
+                        ParallelState::new(
+                            versioned_cache,
+                            scheduler,
+                            start_shared_counter,
+                            shared_counter,
+                        ))? {
+                            scheduler.finish_execution(last_commit_idx, incarnation, validation_mode)?;  
+                        }
+                }
             }
 
             drain_commit_queue()?;
@@ -821,11 +857,12 @@ where
                 SchedulerTask::ExecutionTask(
                     txn_idx,
                     incarnation,
-                    ExecutionTaskType::Execution(flag), // ATTENTION
+                    ExecutionTaskType::Execution, // ATTENTION
                 ) => {
-                    let needs_suffix_validation = Self::execute(
+                    if let Some(validation_mode) = Self::execute(
                         txn_idx,
                         incarnation,
+                        false,
                         block,
                         last_input_output,
                         versioned_cache,
@@ -837,8 +874,9 @@ where
                             start_shared_counter,
                             shared_counter,
                         ),
-                    )?;
-                    scheduler.finish_execution(txn_idx, incarnation, needs_suffix_validation)?
+                    )? {
+                        scheduler.finish_execution(txn_idx, incarnation, validation_mode)?
+                    }
                 },
                 SchedulerTask::ExecutionTask(_, _, ExecutionTaskType::Wakeup(condvar)) => {
                     {
@@ -907,11 +945,10 @@ where
 
         let last_input_output = TxnLastInputOutput::new(num_txns);
         let scheduler = Scheduler::new(num_txns);
-        let thread_ids: Vec<usize> = (0..concurrency_level).collect();
 
         let timer = RAYON_EXECUTION_SECONDS.start_timer();
         self.executor_thread_pool.scope(|s| {
-            for i in &thread_ids {
+            for _ in 0..concurrency_level {
                 s.spawn(|_| {
                     if let Err(err) = self.worker_loop(
                         env,
@@ -924,7 +961,6 @@ where
                         &shared_counter,
                         &shared_commit_state,
                         &final_results,
-                        i,
                     ) {
                         // If there are multiple errors, they all get logged:
                         // ModulePathReadWriteError and FatalVMError variant is logged at construction,
