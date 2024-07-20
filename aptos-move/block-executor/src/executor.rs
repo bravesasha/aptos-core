@@ -142,13 +142,14 @@ where
         let validation_function = if fallback {
             None
         } else {
-            Some(|| -> Result<bool,PanicError> {  
-                Self::validate(idx_to_execute, last_input_output, versioned_cache)
+            Some(|| -> bool {  
+                read_set.validate_data_reads(versioned_cache.data(), idx_to_execute)
+                && read_set.validate_group_reads(versioned_cache.group_data(), idx_to_execute)
             })
         };
 
         let mut ret_mode = if let Some(is_validated) = 
-            scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function)? {
+            scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function) {
             if is_validated {
                 ValidationMode::None
             } else {
@@ -158,6 +159,7 @@ where
             return Ok(None);
         }; 
     
+        println!("won write, txn={}, fallback={}", idx_to_execute, fallback);
 
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
@@ -842,10 +844,11 @@ where
                 scheduler.queueing_commits_mark_done();
             }
 
-            /*if let Some(last_commit_idx) = last_commit_idx {
+            if let Some(last_commit_idx) = last_commit_idx {
                 if let Some(incarnation) = scheduler.try_fallback(last_commit_idx+1) {
+                    println!("got into fallback, txn={}", last_commit_idx+1);
                     if let Some(validation_mode) = Self::execute(
-                        last_commit_idx,
+                        last_commit_idx+1,
                         incarnation,
                         true,
                         scheduler,
@@ -861,15 +864,15 @@ where
                             shared_counter,
                         ),
                     )? {
-                        //if we are in fallback and won write no need to validate
+                        //if we are in fallback and won write => no need to validate
                         scheduler.finish_execution(
-                            last_commit_idx,
+                            last_commit_idx+1,
                             incarnation,
                             validation_mode,
                         )?;
                     }
                 }
-            } */
+            } 
 
             drain_commit_queue()?;
 

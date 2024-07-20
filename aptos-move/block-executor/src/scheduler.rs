@@ -653,9 +653,9 @@ impl Scheduler {
         &self,
         txn_idx: TxnIndex,
         maybe_validation_f: Option<F>,
-    ) -> Result<Option<bool>, PanicError>
+    ) -> Option<bool>
     where
-        F: Fn() -> Result<bool,PanicError>
+        F: Fn() -> bool
     {
         let mut status: parking_lot::lock_api::RwLockWriteGuard<
             parking_lot::RawRwLock,
@@ -668,18 +668,18 @@ impl Scheduler {
                     | ExecutionStatus::ReadyToWakeUp(_, _, ref mut flag) => match flag {
                         ExecutingFlag::Main => {
                             *flag = ExecutingFlag::Writing;
-                            Ok(Some(false))
+                            Some(false)
                         },
                         ExecutingFlag::Fallback => {
                             drop(status);
-                            if validation_f()? {
+                            if validation_f() {
                                 let mut status = self.txn_status[txn_idx as usize].0.write();
-                                Ok(self.try_set_writing_from_fallback(&mut status))
+                                self.try_set_writing_from_fallback(&mut status)
                             } else {
-                                Ok(None)
+                                None
                             }
                         },
-                        ExecutingFlag::Writing => Ok(None),
+                        ExecutingFlag::Writing => None,
                     },
                     ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
                     ExecutionStatus::Aborting(_) => {
@@ -692,13 +692,13 @@ impl Scheduler {
                     },
                     ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | ExecutionStatus::ExecutionHalted => {
                         // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
-                        Ok(None)
+                        None
                     }
                 }
             },
             None => {
                 // Already inside fallback, no need to revalidate
-                Ok(self.try_set_writing_from_fallback(&mut status))
+                self.try_set_writing_from_fallback(&mut status)
             }    
         }
     }
