@@ -120,24 +120,7 @@ where
         let sync_view = LatestView::new(base_view, ViewState::Sync(parallel_state), idx_to_execute);
         let execute_result = executor.execute_transaction(&sync_view, txn, idx_to_execute);
 
-        let mut prev_modified_keys = last_input_output
-            .modified_keys(idx_to_execute)
-            .map_or(HashMap::new(), |keys| keys.collect());
-
-        let mut prev_modified_delayed_fields = last_input_output
-            .delayed_field_keys(idx_to_execute)
-            .map_or(HashSet::new(), |keys| keys.collect());
-
         let mut read_set = sync_view.take_parallel_reads();
-
-        // NOTE: when passing lambda, it should do full validation (including delayed fields),
-        // the same way it is currently done in prepare_and_queue_commit_ready.. (validate_commit_ready).
-        // When we have None (or possibly SuffixAfterSelf returned), prepare_and_queue can also
-        // skip the extra validation step!!!
-        // ValidationMode::None
-        // } else {
-        // ValidationMode::SelfOnly
-        // };
 
         let validation_function = if fallback {
             None
@@ -148,30 +131,26 @@ where
             })
         };
 
-        if fallback {
-            println!("trying to win write in fallback, idx={}", idx_to_execute);
-        }
-
         let mut ret_mode = if let Some(is_validated) = 
             scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function) {
             if is_validated {
-                if !fallback {                
-                    println!("won write, saw fallback and validated, idx={}", idx_to_execute);
-                }
                 ValidationMode::None
             } else {
                 ValidationMode::SelfOnly
             }
         } else {
-            if fallback {
-                println!("inside execute, lost write in fallback, idx={}", idx_to_execute);
-            }
             return Ok(None);
         }; 
     
-        if fallback {
-            println!("won write, txn={}, fallback={}", idx_to_execute, fallback);
-        }    
+
+        let mut prev_modified_keys = last_input_output
+            .modified_keys(idx_to_execute)
+            .map_or(HashMap::new(), |keys| keys.collect());
+
+        let mut prev_modified_delayed_fields = last_input_output
+            .delayed_field_keys(idx_to_execute)
+            .map_or(HashSet::new(), |keys| keys.collect());
+
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
         // set (vanilla Block-STM rule), or if resource group size or metadata changed from an estimate
@@ -444,7 +423,6 @@ where
         let aborted = !valid && scheduler.try_abort(txn_idx, incarnation);
 
         if aborted {
-            println!("failed validation, idx={}", txn_idx);
             Self::update_transaction_on_abort(txn_idx, last_input_output, versioned_cache);
             scheduler.finish_abort(txn_idx, incarnation)
         } else {
@@ -517,9 +495,7 @@ where
         let mut last_commit_idx: Option<u32> = None;
 
         while let Some((txn_idx, incarnation)) = scheduler.try_commit() {
-            println!("committed, txn={}", txn_idx);
             last_commit_idx = Some(txn_idx);
-            // TODO: we can skip this one too.
             if !Self::validate_commit_ready(txn_idx, versioned_cache, last_input_output)? {
                 // Transaction needs to be re-executed, one final time.
 
@@ -883,13 +859,7 @@ where
                             incarnation,
                             validation_mode,
                         )?;
-                        println!("finished execution, txn={}", last_commit_idx+1);
                     }
-                    else {
-                        println!("lost fallback, txn={}", last_commit_idx+1);
-                    }
-                } else {
-                    println!("failed to go into fallback, idx={}", last_commit_idx+1);
                 }
             } 
 

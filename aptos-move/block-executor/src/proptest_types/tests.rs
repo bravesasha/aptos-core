@@ -110,7 +110,7 @@ proptest! {
     fn abort_only(
         universe in vec(any::<[u8; 32]>(), 80),
         transaction_gen in vec(any::<TransactionGen<[u8;32]>>(), 3).no_shrink(),
-        abort_transactions in vec(any::<Index>(), 5),
+        abort_transactions in vec(any::<Index>(), 300),
         skip_rest_transactions in vec(any::<Index>(), 0),
     ) {
         run_transactions::<[u8; 32], [u8; 32], MockEvent>(&universe, transaction_gen, abort_transactions, skip_rest_transactions, 1, (false, false), None);
