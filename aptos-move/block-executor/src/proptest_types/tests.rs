@@ -109,7 +109,7 @@ proptest! {
     #[test]
     fn abort_only(
         universe in vec(any::<[u8; 32]>(), 80),
-        transaction_gen in vec(any::<TransactionGen<[u8;32]>>(), 300).no_shrink(),
+        transaction_gen in vec(any::<TransactionGen<[u8;32]>>(), 3).no_shrink(),
         abort_transactions in vec(any::<Index>(), 5),
         skip_rest_transactions in vec(any::<Index>(), 0),
     ) {

@@ -148,19 +148,30 @@ where
             })
         };
 
+        if fallback {
+            println!("trying to win write in fallback, idx={}", idx_to_execute);
+        }
+
         let mut ret_mode = if let Some(is_validated) = 
             scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function) {
             if is_validated {
+                if !fallback {                
+                    println!("won write, saw fallback and validated, idx={}", idx_to_execute);
+                }
                 ValidationMode::None
             } else {
                 ValidationMode::SelfOnly
             }
         } else {
+            if fallback {
+                println!("inside execute, lost write in fallback, idx={}", idx_to_execute);
+            }
             return Ok(None);
         }; 
     
-        println!("won write, txn={}, fallback={}", idx_to_execute, fallback);
-
+        if fallback {
+            println!("won write, txn={}, fallback={}", idx_to_execute, fallback);
+        }    
         // For tracking whether it's required to (re-)validate the suffix of transactions in the block.
         // May happen, for instance, when the recent execution wrote outside of the previous write/delta
         // set (vanilla Block-STM rule), or if resource group size or metadata changed from an estimate
@@ -244,7 +255,7 @@ where
             for (id, change) in delayed_field_change_set.into_iter() {
                 prev_modified_delayed_fields.remove(&id);
 
-                let entry = change.into_entry_no_additional_history();
+                let entry= change.into_entry_no_additional_history();
 
                 // TODO[agg_v2](optimize): figure out if it is useful for change to add_suffix
                 if let Err(e) =
@@ -433,6 +444,7 @@ where
         let aborted = !valid && scheduler.try_abort(txn_idx, incarnation);
 
         if aborted {
+            println!("failed validation, idx={}", txn_idx);
             Self::update_transaction_on_abort(txn_idx, last_input_output, versioned_cache);
             scheduler.finish_abort(txn_idx, incarnation)
         } else {
@@ -505,6 +517,7 @@ where
         let mut last_commit_idx: Option<u32> = None;
 
         while let Some((txn_idx, incarnation)) = scheduler.try_commit() {
+            println!("committed, txn={}", txn_idx);
             last_commit_idx = Some(txn_idx);
             // TODO: we can skip this one too.
             if !Self::validate_commit_ready(txn_idx, versioned_cache, last_input_output)? {
@@ -870,7 +883,13 @@ where
                             incarnation,
                             validation_mode,
                         )?;
+                        println!("finished execution, txn={}", last_commit_idx+1);
                     }
+                    else {
+                        println!("lost fallback, txn={}", last_commit_idx+1);
+                    }
+                } else {
+                    println!("failed to go into fallback, idx={}", last_commit_idx+1);
                 }
             } 
 
@@ -878,6 +897,7 @@ where
 
             scheduler_task = match scheduler_task {
                 SchedulerTask::ValidationTask(txn_idx, incarnation, wave) => {
+                    println!("validating, idx={}", txn_idx);
                     let valid = Self::validate(txn_idx, last_input_output, versioned_cache)?;
                     Self::update_on_validation(
                         txn_idx,
@@ -889,11 +909,13 @@ where
                         scheduler,
                     )?
                 },
+
                 SchedulerTask::ExecutionTask(
                     txn_idx,
                     incarnation,
                     ExecutionTaskType::Execution, // ATTENTION
                 ) => {
+                    println!("executing, idx={}", txn_idx);
                     if let Some(validation_mode) = Self::execute(
                         txn_idx,
                         incarnation,
@@ -913,6 +935,7 @@ where
                     )? {
                         scheduler.finish_execution(txn_idx, incarnation, validation_mode)?
                     } else {
+                        println!("failed to get write lock, idx={}", txn_idx);
                         SchedulerTask::Retry
                     }
                 },
@@ -929,7 +952,7 @@ where
 
                     scheduler.next_task()
                 },
-                SchedulerTask::Retry => scheduler.next_task(),
+                SchedulerTask::Retry => { /*println!("need to retry"); */ scheduler.next_task() }
                 SchedulerTask::Done => {
                     drain_commit_queue()?;
                     break Ok(());

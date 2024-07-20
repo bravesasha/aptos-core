@@ -402,6 +402,9 @@ impl Scheduler {
             return None;
         }
 
+        println!("trying to commit in scheduler, txn={}", *commit_idx);
+
+
         let validation_status = self.txn_status[*commit_idx as usize].1.read();
 
         // Acquired the validation status read lock.
@@ -412,7 +415,7 @@ impl Scheduler {
             // Acquired the execution status read lock, which can be upgrade to write lock if necessary.
             if let ExecutionStatus::Executed(incarnation) = *status {
                 // Status is executed and we are holding the lock.
-
+                println!("status is executed, txn={}, incarnation={}", *commit_idx, incarnation);
                 // Note we update the wave inside commit_state only with max_triggered_wave,
                 // since max_triggered_wave records the new wave when validation index is
                 // decreased thus affecting all later txns as well,
@@ -425,6 +428,7 @@ impl Scheduler {
                         // Can commit.
                         *status_write = ExecutionStatus::Committed(incarnation);
 
+                        println!("changed status to committed, idx={}, incarnation={}", *commit_idx, incarnation);
                         *commit_idx += 1;
                         if *commit_idx == self.num_txns {
                             // All txns have been committed, the parallel execution can finish.
@@ -563,6 +567,7 @@ impl Scheduler {
         // and like this correctness argument is much easier to see, which is also why we grab
         // the write lock directly, and never release it during the whole function. This way,
         // even validation status readers have to wait if they somehow end up at the same index.
+        println!("finishing execution, idx={}", txn_idx);
         let mut validation_status = self.txn_status[txn_idx as usize].1.write();
         self.set_executed_status(txn_idx, incarnation)?;
 
@@ -585,17 +590,23 @@ impl Scheduler {
                 };
             }
 
+            // Update the minimum wave this txn needs to pass.
+            validation_status.required_wave = cur_wave;
+
             if matches!(
                 validation_mode,
                 ValidationMode::SelfOnly | ValidationMode::SuffixAndSelf
             ) {
-                // Update the minimum wave this txn needs to pass.
-                validation_status.required_wave = cur_wave;
                 return Ok(SchedulerTask::ValidationTask(
                     txn_idx,
                     incarnation,
                     cur_wave,
                 ));
+            }
+            else {
+                //this is the same as call to update_on_validation, but validity is guaranteed
+                self.finish_validation(txn_idx, cur_wave);
+                self.queueing_commits_arm();
             }
         }
 
@@ -1163,6 +1174,7 @@ impl Scheduler {
                 if stored_incarnation == incarnation =>
             {
                 *status = ExecutionStatus::Executed(incarnation);
+                println!("set executed status!!!!, idx={}", txn_idx);
                 Ok(())
             },
             ExecutionStatus::ExecutionHalted => {
