@@ -274,7 +274,7 @@ pub(crate) struct FieldInstantiation {
 
 impl Module {
     pub(crate) fn new_v2(
-        _module_storage: &impl ModuleStorageV2,
+        _module_storage: &dyn ModuleStorageV2,
         _struct_name_index_map: &StructNameIndexMap,
         _compiled_module: Arc<CompiledModule>,
     ) -> PartialVMResult<Self> {
