@@ -10,6 +10,9 @@ use crate::{
         BinaryCache,
     },
     native_functions::NativeFunctions,
+    storage::{
+        module_storage::ModuleStorage as ModuleStorageV2, struct_name_index_map::StructNameIndexMap,
+    },
 };
 use move_binary_format::{
     access::ModuleAccess,
@@ -270,6 +273,14 @@ pub(crate) struct FieldInstantiation {
 }
 
 impl Module {
+    pub(crate) fn new_v2(
+        _module_storage: &impl ModuleStorageV2,
+        _struct_name_index_map: &StructNameIndexMap,
+        _compiled_module: Arc<CompiledModule>,
+    ) -> PartialVMResult<Self> {
+        unimplemented!()
+    }
+
     pub(crate) fn new(
         natives: &NativeFunctions,
         size: usize,
