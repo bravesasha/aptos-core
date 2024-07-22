@@ -709,6 +709,8 @@ pub enum EntryFunctionCall {
         code: Vec<Vec<u8>>,
     },
 
+    ScheduleTransactionQueueFoo {},
+
     /// Add `amount` of coins from the `account` owning the StakePool.
     StakeAddStake {
         amount: u64,
@@ -1449,6 +1451,7 @@ impl EntryFunctionCall {
                 metadata_serialized,
                 code,
             ),
+            ScheduleTransactionQueueFoo {} => schedule_transaction_queue_foo(),
             StakeAddStake { amount } => stake_add_stake(amount),
             StakeIncreaseLockup {} => stake_increase_lockup(),
             StakeInitializeStakeOwner {
@@ -3569,6 +3572,21 @@ pub fn resource_account_create_resource_account_and_publish_package(
             bcs::to_bytes(&metadata_serialized).unwrap(),
             bcs::to_bytes(&code).unwrap(),
         ],
+    ))
+}
+
+pub fn schedule_transaction_queue_foo() -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("schedule_transaction_queue").to_owned(),
+        ),
+        ident_str!("foo").to_owned(),
+        vec![],
+        vec![],
     ))
 }
 
@@ -5727,6 +5745,16 @@ mod decoder {
         }
     }
 
+    pub fn schedule_transaction_queue_foo(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(_script) = payload {
+            Some(EntryFunctionCall::ScheduleTransactionQueueFoo {})
+        } else {
+            None
+        }
+    }
+
     pub fn stake_add_stake(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::StakeAddStake {
@@ -6708,6 +6736,10 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "resource_account_create_resource_account_and_publish_package".to_string(),
             Box::new(decoder::resource_account_create_resource_account_and_publish_package),
+        );
+        map.insert(
+            "schedule_transaction_queue_foo".to_string(),
+            Box::new(decoder::schedule_transaction_queue_foo),
         );
         map.insert(
             "stake_add_stake".to_string(),

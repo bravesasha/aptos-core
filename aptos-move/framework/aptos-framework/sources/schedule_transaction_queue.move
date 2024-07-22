@@ -10,12 +10,17 @@ module aptos_framework::schedule_transaction_queue {
     use aptos_framework::aggregator_v2::{Self, Aggregator};
     use aptos_framework::avl_queue::{Self, AVLqueue};
     use aptos_framework::system_addresses;
+    use aptos_framework::transaction_context::EntryFunctionPayload;
+
+    friend aptos_framework::transaction_validation;
+    friend aptos_framework::block;
 
     struct ScheduledTransaction has copy, drop, store {
         // with a granularity of 1 second
         scheduled_time: u64,
-        payload: vector<u8>,
+        max_gas_unit: u64,
         sender: address,
+        payload: EntryFunctionPayload,
     }
 
     struct TransactionId has copy, drop, store {
@@ -31,11 +36,12 @@ module aptos_framework::schedule_transaction_queue {
         num: Aggregator<u64>,
     }
 
-    public fun new_transaction(scheduled_time: u64, payload: vector<u8>, sender: address): ScheduledTransaction {
+    public fun new_transaction(scheduled_time: u64, max_gas_unit: u64, payload: EntryFunctionPayload, sender: address): ScheduledTransaction {
         ScheduledTransaction {
             scheduled_time: scheduled_time,
-            payload: payload,
-            sender: sender,
+            max_gas_unit,
+            sender,
+            payload,
         }
     }
 
@@ -92,7 +98,8 @@ module aptos_framework::schedule_transaction_queue {
 
     // Execute view function before execution to prepare scheduled transaction (pop head is fine since the side effect is not persisted)
     #[view]
-    public fun get_ready_transactions(timestamp: u64, limit: u64): vector<ScheduledTransaction> acquires ScheduledQueue {
+    public fun get_ready_transactions(timestamp: u64, limit: u64): vector<ScheduledTransaction> acquires ScheduledQueue, ToRemove {
+        reset();
         let scheduled_queue = borrow_global_mut<ScheduledQueue>(@aptos_framework);
         let result = vector[];
         while (vector::length(&result) < limit) {
@@ -120,13 +127,13 @@ module aptos_framework::schedule_transaction_queue {
     }
 
     /// Increment at every scheduled transaction without affect parallelism
-    fun finish_execution() acquires ToRemove {
+    public(friend) fun finish_execution() acquires ToRemove {
         let to_remove = borrow_global_mut<ToRemove>(@aptos_framework);
         aggregator_v2::add(&mut to_remove.num, 1);
     }
 
     /// Reset at beginning of each block
-    fun reset() acquires ToRemove, ScheduledQueue {
+    public(friend) fun reset() acquires ToRemove, ScheduledQueue {
         let to_remove = borrow_global_mut<ToRemove>(@aptos_framework);
         let num_to_remove = aggregator_v2::read(&to_remove.num);
         aggregator_v2::sub(&mut to_remove.num, num_to_remove);
@@ -148,6 +155,9 @@ module aptos_framework::schedule_transaction_queue {
                 return
             }
         }
+    }
+
+    entry fun foo() {
     }
 
     #[test(fx = @0x1)]
