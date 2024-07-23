@@ -565,7 +565,11 @@ impl Scheduler {
         let mut validation_status = self.txn_status[txn_idx as usize].1.write();
         self.set_executed_status(txn_idx, incarnation)?;
 
+        println!("set executed status, idx={}", txn_idx);
+
         self.wake_dependencies_after_execution(txn_idx)?;
+
+
 
         let (cur_val_idx, mut cur_wave) =
             Self::unpack_validation_idx(self.validation_idx.load(Ordering::Acquire));
@@ -625,10 +629,11 @@ impl Scheduler {
             parking_lot::RawRwLock,
             ExecutionStatus,
         >,
+        expected_incarnation: Option<Incarnation>,
     ) -> Option<bool> {
         match &mut **status {
-            ExecutionStatus::Executing(_, _, ref mut flag)
-            | ExecutionStatus::ReadyToWakeUp(_, _, ref mut flag) => match flag {
+            ExecutionStatus::Executing(incarnation, _, ref mut flag)
+            | ExecutionStatus::ReadyToWakeUp(incarnation, _, ref mut flag) if (expected_incarnation.is_none() || *incarnation == expected_incarnation.unwrap()) => match flag {
                 ExecutingFlag::Main => unreachable!("Should never be Main after Fallback"),
                 ExecutingFlag::Fallback => {
                     *flag = ExecutingFlag::Writing;
@@ -648,6 +653,9 @@ impl Scheduler {
             ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | 
             ExecutionStatus::ExecutionHalted => {
                 // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
+                None
+            },
+            _ => {
                 None
             }
         }
@@ -670,22 +678,28 @@ impl Scheduler {
         match maybe_validation_f {
             Some(validation_f) => {
                 match &mut *status {
-                    ExecutionStatus::Executing(_, _, ref mut flag)
-                    | ExecutionStatus::ReadyToWakeUp(_, _, ref mut flag) => match flag {
+                    ExecutionStatus::Executing(incarnation, _, ref mut flag)
+                    | ExecutionStatus::ReadyToWakeUp(incarnation, _, ref mut flag) => match flag {
                         ExecutingFlag::Main => {
+                            println!("only main thread, idx={}", txn_idx);
                             *flag = ExecutingFlag::Writing;
                             Some(false)
                         },
                         ExecutingFlag::Fallback => {
+                            println!("saw fallback, trying to validate, idx={}", txn_idx);
+                            let old_incarnation = *incarnation;
                             drop(status);
                             if validation_f() {
                                 let mut status = self.txn_status[txn_idx as usize].0.write();
-                                self.try_set_writing_from_fallback(&mut status)
+                                self.try_set_writing_from_fallback(&mut status, Some(old_incarnation))
                             } else {
                                 None
                             }
                         },
-                        ExecutingFlag::Writing => None,
+                        ExecutingFlag::Writing => {
+                            println!("lost writing, inside set executionflag, idx={}", txn_idx);
+                            None
+                        }
                     },
                     ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
                     ExecutionStatus::Aborting(_) => {
@@ -696,15 +710,24 @@ impl Scheduler {
                         // for the same reason it can not be ReadyToExecute or Aborting
                         unreachable!("May not be Suspended, Aborting or ReadyToExecute");
                     },
-                    ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | ExecutionStatus::ExecutionHalted => {
+                    ExecutionStatus::Committed(_) => {
+                        println!("saw already committed, idx={}", txn_idx);
+                        None
+                    },
+                    ExecutionStatus::Executed(_) => {
+                        println!("saw already executed, idx={}", txn_idx);
+                        None
+                    },
+                    ExecutionStatus::ExecutionHalted => {
                         // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
+                        println!("saw execution halted, idx={}", txn_idx);
                         None
                     }
                 }
             },
             None => {
                 // Already inside fallback, no need to revalidate
-                self.try_set_writing_from_fallback(&mut status)
+                self.try_set_writing_from_fallback(&mut status, None)
             }    
         }
     }
@@ -1165,9 +1188,22 @@ impl Scheduler {
     ) -> Result<(), PanicError> {
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match *status {
-            ExecutionStatus::Executing(stored_incarnation, _, _)
+            ExecutionStatus::Executing(stored_incarnation, _, _) 
                 if stored_incarnation == incarnation =>
             {
+                *status = ExecutionStatus::Executed(incarnation);
+                Ok(())
+            },
+            ExecutionStatus::ReadyToWakeUp(_, ref mut condvar, _) =>
+            {
+                {
+                    let (lock, cvar) = &**condvar;
+                    // Mark dependency resolved.
+                    let mut lock = lock.lock();
+                    *lock = DependencyStatus::Resolved;
+                    // Wake up the process waiting for dependency.
+                    cvar.notify_one();
+                }
                 *status = ExecutionStatus::Executed(incarnation);
                 Ok(())
             },
@@ -1175,10 +1211,13 @@ impl Scheduler {
                 // The execution is already halted.
                 Ok(())
             },
-            _ => Err(code_invariant_error(format!(
+            _ => {
+                println!("error due executed status, idx={}", txn_idx);
+                Err(code_invariant_error(format!(
                 "Expected Executing incarnation {incarnation}, got {:?}",
                 &*status,
-            ))),
+            )))
+            }
         }
     }
 

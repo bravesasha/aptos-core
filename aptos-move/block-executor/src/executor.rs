@@ -504,6 +504,7 @@ where
                 // are executing immediately, and will reduce it unconditionally
                 // after execution, inside finish_execution_during_commit.
                 // Because of that, we can also ignore _needs_suffix_validation result.
+                println!("executing during commit, idx={}", txn_idx);
                 let _validation_mode = Self::execute(
                     txn_idx,
                     incarnation + 1,
@@ -619,6 +620,7 @@ where
                 }
 
                 if scheduler.halt() {
+                    println!("called halt, txn_idx={}", txn_idx + 1);
                     block_limit_processor.finish_parallel_update_counters_and_log_info(
                         txn_idx + 1,
                         scheduler.num_txns(),
@@ -854,11 +856,13 @@ where
                         ),
                     )? {
                         //if we are in fallback and won write => no need to validate
-                        scheduler.finish_execution(
+                        println!("started execution, idx={}", last_commit_idx+1);
+                       scheduler.finish_execution(
                             last_commit_idx+1,
                             incarnation,
                             validation_mode,
                         )?;
+                        println!("finished execution, idx={}", last_commit_idx+1);
                     }
                 }
             } 
@@ -867,7 +871,6 @@ where
 
             scheduler_task = match scheduler_task {
                 SchedulerTask::ValidationTask(txn_idx, incarnation, wave) => {
-                    println!("validating, idx={}", txn_idx);
                     let valid = Self::validate(txn_idx, last_input_output, versioned_cache)?;
                     Self::update_on_validation(
                         txn_idx,
@@ -885,7 +888,6 @@ where
                     incarnation,
                     ExecutionTaskType::Execution, // ATTENTION
                 ) => {
-                    println!("executing, idx={}", txn_idx);
                     if let Some(validation_mode) = Self::execute(
                         txn_idx,
                         incarnation,
@@ -998,9 +1000,10 @@ where
                         // and below we log CodeInvariantErrors.
                         if let PanicOr::CodeInvariantError(err_msg) = err {
                             alert!("[BlockSTM] worker loop: CodeInvariantError({:?})", err_msg);
+                            println!("{:?}", err_msg);
                         }
                         shared_maybe_error.store(true, Ordering::SeqCst);
-
+                        println!("calling halt due to panic");
                         // Make sure to halt the scheduler if it hasn't already been halted.
                         scheduler.halt();
                     }
