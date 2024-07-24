@@ -679,3 +679,423 @@ fn reconstruct_and_verify_batch(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use aptos_bitvec::BitVec;
+    use aptos_consensus_types::{
+        block::Block,
+        block_data::{BlockData, BlockType},
+        common::{Author, ProofWithData, ProofWithDataWithTxnLimit},
+        proof_of_store::BatchId,
+        quorum_cert::QuorumCert,
+    };
+    use aptos_crypto::HashValue;
+    use aptos_types::{
+        aggregate_signature::AggregateSignature,
+        ledger_info::LedgerInfo,
+        validator_signer::ValidatorSigner,
+        validator_verifier::{ValidatorConsensusInfo, ValidatorVerifier},
+        PeerId,
+    };
+    use claims::assert_matches;
+
+    #[test]
+    fn test_verify_against_ordered_payload_mempool() {
+        // Create an empty block transaction payload
+        let transaction_payload = BlockTransactionPayload::new_in_quorum_store(vec![], vec![]);
+
+        // Create a direct mempool payload
+        let ordered_payload = Payload::DirectMempool(vec![]);
+
+        // Verify the transaction payload (and ensure it fails as mempool payloads are not supported)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+    }
+
+    #[test]
+    fn test_verify_against_ordered_payload_in_qs() {
+        // Create an empty block transaction payload with no proofs
+        let proofs = vec![];
+        let transaction_payload =
+            BlockTransactionPayload::new_in_quorum_store(vec![], proofs.clone());
+
+        // Create a quorum store payload with a single proof
+        let batch_info = create_batch_info();
+        let proof_with_data = ProofWithData::new(vec![ProofOfStore::new(
+            batch_info,
+            AggregateSignature::empty(),
+        )]);
+        let ordered_payload = Payload::InQuorumStore(proof_with_data);
+
+        // Verify the transaction payload (and ensure it fails as the batch infos don't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a quorum store payload with no proofs
+        let proof_with_data = ProofWithData::new(proofs);
+        let ordered_payload = Payload::InQuorumStore(proof_with_data);
+
+        // Verify the transaction payload (and ensure it passes)
+        transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_verify_against_ordered_payload_in_qs_limit() {
+        // Create an empty block transaction payload with no proofs
+        let proofs = vec![];
+        let transaction_limit = Some(10);
+        let transaction_payload = BlockTransactionPayload::new_in_quorum_store_with_limit(
+            vec![],
+            proofs.clone(),
+            transaction_limit,
+        );
+
+        // Create a quorum store payload with a single proof and the same limit
+        let batch_info = create_batch_info();
+        let proof_with_data = ProofWithDataWithTxnLimit::new(
+            ProofWithData::new(vec![ProofOfStore::new(
+                batch_info,
+                AggregateSignature::empty(),
+            )]),
+            transaction_limit,
+        );
+        let ordered_payload = Payload::InQuorumStoreWithLimit(proof_with_data);
+
+        // Verify the transaction payload (and ensure it fails as the batch infos don't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a quorum store payload with no proofs and no transaction limit
+        let proof_with_data =
+            ProofWithDataWithTxnLimit::new(ProofWithData::new(proofs.clone()), None);
+        let ordered_payload = Payload::InQuorumStoreWithLimit(proof_with_data);
+
+        // Verify the transaction payload (and ensure it fails as the transaction limit doesn't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a quorum store payload with no proofs and a transaction limit
+        let proof_with_data =
+            ProofWithDataWithTxnLimit::new(ProofWithData::new(proofs), transaction_limit);
+        let ordered_payload = Payload::InQuorumStoreWithLimit(proof_with_data);
+
+        // Verify the transaction payload (and ensure it passes)
+        transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_verify_against_ordered_payload_in_qs_hybrid() {
+        // Create an empty block transaction payload with no proofs and no inline batches
+        let proofs = vec![];
+        let transaction_limit = Some(100);
+        let inline_batches = vec![];
+        let transaction_payload = BlockTransactionPayload::new_quorum_store_inline_hybrid(
+            vec![],
+            proofs.clone(),
+            transaction_limit,
+            inline_batches.clone(),
+        );
+
+        // Create a quorum store payload with a single proof
+        let inline_batches = vec![];
+        let batch_info = create_batch_info();
+        let proof_with_data = ProofWithData::new(vec![ProofOfStore::new(
+            batch_info,
+            AggregateSignature::empty(),
+        )]);
+        let ordered_payload = Payload::QuorumStoreInlineHybrid(
+            inline_batches.clone(),
+            proof_with_data,
+            transaction_limit,
+        );
+
+        // Verify the transaction payload (and ensure it fails as the batch infos don't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a quorum store payload with no transaction limit
+        let proof_with_data = ProofWithData::new(vec![]);
+        let ordered_payload =
+            Payload::QuorumStoreInlineHybrid(inline_batches.clone(), proof_with_data, None);
+
+        // Verify the transaction payload (and ensure it fails as the transaction limit doesn't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a quorum store payload with a single inline batch
+        let proof_with_data = ProofWithData::new(vec![]);
+        let ordered_payload = Payload::QuorumStoreInlineHybrid(
+            vec![(create_batch_info(), vec![])],
+            proof_with_data,
+            transaction_limit,
+        );
+
+        // Verify the transaction payload (and ensure it fails as the inline batches don't match)
+        let error = transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create an empty quorum store payload
+        let proof_with_data = ProofWithData::new(vec![]);
+        let ordered_payload =
+            Payload::QuorumStoreInlineHybrid(vec![], proof_with_data, transaction_limit);
+
+        // Verify the transaction payload (and ensure it passes)
+        transaction_payload
+            .verify_against_ordered_payload(&ordered_payload)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_verify_commit_proof() {
+        // Create a ledger info with an empty signature set
+        let current_epoch = 0;
+        let ledger_info = create_empty_ledger_info(current_epoch);
+
+        // Create an epoch state for the current epoch (with an empty verifier)
+        let epoch_state = EpochState::new(current_epoch, ValidatorVerifier::new(vec![]));
+
+        // Create a commit decision message with the ledger info
+        let commit_decision = CommitDecision::new(ledger_info);
+
+        // Verify the commit proof (and ensure it doesn't fail)
+        commit_decision.verify_commit_proof(&epoch_state).unwrap();
+
+        // Create an epoch state for the current epoch (with a non-empty verifier)
+        let validator_signer = ValidatorSigner::random(None);
+        let validator_consensus_info = ValidatorConsensusInfo::new(
+            validator_signer.author(),
+            validator_signer.public_key(),
+            100,
+        );
+        let validator_verifier = ValidatorVerifier::new(vec![validator_consensus_info]);
+        let epoch_state = EpochState::new(current_epoch, validator_verifier.clone());
+
+        // Verify the commit proof (and ensure it fails)
+        let error = commit_decision
+            .verify_commit_proof(&epoch_state)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+    }
+
+    #[test]
+    fn test_verify_ordered_blocks() {
+        // Create an ordered block with no internal blocks
+        let current_epoch = 0;
+        let ordered_block = OrderedBlock::new(vec![], create_empty_ledger_info(current_epoch));
+
+        // Verify the ordered blocks (and ensure it fails, because there are no blocks)
+        let error = ordered_block.verify_ordered_blocks().unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create a pipelined block with a random block ID
+        let block_id = HashValue::random();
+        let block_info = create_block_info(current_epoch, block_id);
+        let pipelined_block = create_pipelined_block(block_info.clone());
+
+        // Create an ordered block with the pipelined block and a random proof
+        let ordered_block = OrderedBlock::new(
+            vec![pipelined_block.clone()],
+            create_empty_ledger_info(current_epoch),
+        );
+
+        // Verify the ordered blocks (and ensure it fails because the block IDs don't match)
+        let error = ordered_block.verify_ordered_blocks().unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create an ordered block proof with the same block ID
+        let ordered_proof = LedgerInfoWithSignatures::new(
+            LedgerInfo::new(block_info, HashValue::random()),
+            AggregateSignature::empty(),
+        );
+
+        // Create an ordered block with the pipelined block and proof
+        let ordered_block = OrderedBlock::new(vec![pipelined_block], ordered_proof);
+
+        // Verify the ordered block (and ensure it doesn't fail)
+        ordered_block.verify_ordered_blocks().unwrap();
+    }
+
+    #[test]
+    fn test_verify_ordered_blocks_chained() {
+        // Create multiple pipelined blocks that are not chained together
+        let current_epoch = 0;
+        let mut pipelined_blocks = vec![];
+        for _ in 0..3 {
+            // Create the pipelined block
+            let block_id = HashValue::random();
+            let block_info = create_block_info(current_epoch, block_id);
+            let pipelined_block = create_pipelined_block(block_info);
+
+            // Add the pipelined block to the list
+            pipelined_blocks.push(pipelined_block);
+        }
+
+        // Create an ordered block proof with the same block ID as the last pipelined block
+        let last_block_info = pipelined_blocks.last().unwrap().block_info().clone();
+        let ordered_proof = LedgerInfoWithSignatures::new(
+            LedgerInfo::new(last_block_info, HashValue::random()),
+            AggregateSignature::empty(),
+        );
+
+        // Create an ordered block with the pipelined blocks and proof
+        let ordered_block = OrderedBlock::new(pipelined_blocks, ordered_proof);
+
+        // Verify the ordered block (and ensure it fails because the blocks are not chained)
+        let error = ordered_block.verify_ordered_blocks().unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+
+        // Create multiple pipelined blocks that are chained together
+        let mut pipelined_blocks = vec![];
+        let mut expected_parent_id = None;
+        for _ in 0..5 {
+            // Create the pipelined block
+            let block_id = HashValue::random();
+            let block_info = create_block_info(current_epoch, block_id);
+            let pipelined_block = create_pipelined_block_with_parent(
+                block_info,
+                expected_parent_id.unwrap_or_default(),
+            );
+
+            // Add the pipelined block to the list
+            pipelined_blocks.push(pipelined_block);
+
+            // Update the expected parent ID
+            expected_parent_id = Some(block_id);
+        }
+
+        // Create an ordered block proof with the same block ID as the last pipelined block
+        let last_block_info = pipelined_blocks.last().unwrap().block_info().clone();
+        let ordered_proof = LedgerInfoWithSignatures::new(
+            LedgerInfo::new(last_block_info, HashValue::random()),
+            AggregateSignature::empty(),
+        );
+
+        // Create an ordered block with the pipelined blocks and proof
+        let ordered_block = OrderedBlock::new(pipelined_blocks, ordered_proof);
+
+        // Verify the ordered block (and ensure it passes)
+        ordered_block.verify_ordered_blocks().unwrap();
+    }
+
+    #[test]
+    fn test_verify_ordered_proof() {
+        // Create a ledger info with an empty signature set
+        let current_epoch = 100;
+        let ledger_info = create_empty_ledger_info(current_epoch);
+
+        // Create an epoch state for the current epoch (with an empty verifier)
+        let epoch_state = EpochState::new(current_epoch, ValidatorVerifier::new(vec![]));
+
+        // Create an ordered block message with an empty block and ordered proof
+        let ordered_block = OrderedBlock::new(vec![], ledger_info);
+
+        // Verify the ordered proof (and ensure it doesn't fail)
+        ordered_block.verify_ordered_proof(&epoch_state).unwrap();
+
+        // Create an epoch state for the current epoch (with a non-empty verifier)
+        let validator_signer = ValidatorSigner::random(None);
+        let validator_consensus_info = ValidatorConsensusInfo::new(
+            validator_signer.author(),
+            validator_signer.public_key(),
+            100,
+        );
+        let validator_verifier = ValidatorVerifier::new(vec![validator_consensus_info]);
+        let epoch_state = EpochState::new(current_epoch, validator_verifier.clone());
+
+        // Verify the ordered proof (and ensure it fails)
+        let error = ordered_block
+            .verify_ordered_proof(&epoch_state)
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidMessageError(_));
+    }
+
+    /// Creates and returns a new batch info with random data
+    fn create_batch_info() -> BatchInfo {
+        BatchInfo::new(
+            PeerId::random(),
+            BatchId::new(0),
+            10,
+            1,
+            HashValue::random(),
+            1,
+            1,
+            0,
+        )
+    }
+
+    /// Creates and returns a new ordered block with the given block ID
+    fn create_block_info(epoch: u64, block_id: HashValue) -> BlockInfo {
+        BlockInfo::new(epoch, 0, block_id, HashValue::random(), 0, 0, None)
+    }
+
+    /// Creates and returns a new pipelined block with the given block info
+    fn create_pipelined_block(block_info: BlockInfo) -> Arc<PipelinedBlock> {
+        let block_data = BlockData::new_for_testing(
+            block_info.epoch(),
+            block_info.round(),
+            block_info.timestamp_usecs(),
+            QuorumCert::dummy(),
+            BlockType::Genesis,
+        );
+        let block = Block::new_for_testing(block_info.id(), block_data, None);
+        Arc::new(PipelinedBlock::new_ordered(block))
+    }
+
+    /// Creates and returns a new pipelined block with the given block info and parent block ID
+    fn create_pipelined_block_with_parent(
+        block_info: BlockInfo,
+        parent_block_id: HashValue,
+    ) -> Arc<PipelinedBlock> {
+        // Create the block type
+        let block_type = BlockType::DAGBlock {
+            author: Author::random(),
+            failed_authors: vec![],
+            validator_txns: vec![],
+            payload: Payload::DirectMempool(vec![]),
+            node_digests: vec![],
+            parent_block_id,
+            parents_bitvec: BitVec::with_num_bits(0),
+        };
+
+        // Create the block data using the block type
+        let block_data = BlockData::new_for_testing(
+            block_info.epoch(),
+            block_info.round(),
+            block_info.timestamp_usecs(),
+            QuorumCert::dummy(),
+            block_type,
+        );
+
+        // Create the pipelined block
+        let block = Block::new_for_testing(block_info.id(), block_data, None);
+        Arc::new(PipelinedBlock::new_ordered(block))
+    }
+
+    /// Creates and returns a new ledger info with an empty signature set
+    fn create_empty_ledger_info(epoch: u64) -> LedgerInfoWithSignatures {
+        LedgerInfoWithSignatures::new(
+            LedgerInfo::new(BlockInfo::random_with_epoch(epoch, 0), HashValue::random()),
+            AggregateSignature::empty(),
+        )
+    }
+}
