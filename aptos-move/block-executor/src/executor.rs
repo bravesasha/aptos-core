@@ -125,14 +125,16 @@ where
         let validation_function = if fallback {
             None
         } else {
-            Some(|| -> bool {  
-                read_set.validate_data_reads(versioned_cache.data(), idx_to_execute)
-                && read_set.validate_group_reads(versioned_cache.group_data(), idx_to_execute)
+            Some(|| -> bool {
+                !read_set.is_incorrect_use()
+                    && read_set.validate_data_reads(versioned_cache.data(), idx_to_execute)
+                    && read_set.validate_group_reads(versioned_cache.group_data(), idx_to_execute)
             })
         };
 
-        let mut ret_mode = if let Some(is_validated) = 
-            scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function) {
+        let mut ret_mode = if let Some(is_validated) =
+            scheduler.try_set_execution_flag_writing(idx_to_execute, validation_function)
+        {
             if is_validated {
                 ValidationMode::None
             } else {
@@ -140,8 +142,7 @@ where
             }
         } else {
             return Ok(None);
-        }; 
-    
+        };
 
         let mut prev_modified_keys = last_input_output
             .modified_keys(idx_to_execute)
@@ -234,7 +235,7 @@ where
             for (id, change) in delayed_field_change_set.into_iter() {
                 prev_modified_delayed_fields.remove(&id);
 
-                let entry= change.into_entry_no_additional_history();
+                let entry = change.into_entry_no_additional_history();
 
                 // TODO[agg_v2](optimize): figure out if it is useful for change to add_suffix
                 if let Err(e) =
@@ -815,57 +816,67 @@ where
         };
 
         loop {
-            let mut last_commit_idx = None;
-            while scheduler.should_coordinate_commits() {
-                if let Some(last_idx) = self.prepare_and_queue_commit_ready_txns(
-                    &self.config.onchain.block_gas_limit_type,
-                    scheduler,
-                    versioned_cache,
-                    &mut scheduler_task,
-                    last_input_output,
-                    shared_commit_state,
-                    base_view,
-                    start_shared_counter,
-                    shared_counter,
-                    &executor,
-                    block,
-                )? {
-                    last_commit_idx.replace(last_idx);
-                };
-                scheduler.queueing_commits_mark_done();
-            }
-
-            if let Some(last_commit_idx) = last_commit_idx {
-                if let Some(incarnation) = scheduler.try_fallback(last_commit_idx+1) {
-                    println!("got into fallback, txn={}", last_commit_idx+1);
-                    if let Some(validation_mode) = Self::execute(
-                        last_commit_idx+1,
-                        incarnation,
-                        true,
+            if matches!(scheduler_task, SchedulerTask::Retry) {
+                let mut last_commit_idx = None;
+                while scheduler.should_coordinate_commits() {
+                    if let Some(last_idx) = self.prepare_and_queue_commit_ready_txns(
+                        &self.config.onchain.block_gas_limit_type,
                         scheduler,
-                        block,
-                        last_input_output,
                         versioned_cache,
-                        &executor,
+                        &mut scheduler_task,
+                        last_input_output,
+                        shared_commit_state,
                         base_view,
-                        ParallelState::new(
-                            versioned_cache,
-                            scheduler,
-                            start_shared_counter,
-                            shared_counter,
-                        ),
+                        start_shared_counter,
+                        shared_counter,
+                        &executor,
+                        block,
                     )? {
-                        //if we are in fallback and won write => no need to validate
-                        println!("started execution, idx={}", last_commit_idx+1);
-                       scheduler.finish_execution(
-                            last_commit_idx+1,
+                        last_commit_idx.replace(last_idx);
+                    };
+                    scheduler.queueing_commits_mark_done();
+                }
+
+                if let Some(mut last_commit_idx) = last_commit_idx {
+                    //need to process next task
+                    last_commit_idx += 1;
+                    if let Some(incarnation) = scheduler.try_fallback(last_commit_idx) {
+                        println!("got into fallback, txn={}", last_commit_idx);
+                        if let Some(validation_mode) = Self::execute(
+                            last_commit_idx,
                             incarnation,
-                            validation_mode,
-                        )?;
-                        println!("finished execution, idx={}", last_commit_idx+1);
+                            true,
+                            scheduler,
+                            block,
+                            last_input_output,
+                            versioned_cache,
+                            &executor,
+                            base_view,
+                            ParallelState::new(
+                                versioned_cache,
+                                scheduler,
+                                start_shared_counter,
+                                shared_counter,
+                            ),
+                        )? {
+                            //if we are in fallback and won write => no need to validate
+                            println!(
+                                "started finish execution in fallback, idx={}",
+                                last_commit_idx
+                            );
+                            scheduler.finish_execution(
+                                last_commit_idx,
+                                incarnation,
+                                validation_mode,
+                            )?;
+                            println!(
+                                "finished finish execution in fallback, idx={}",
+                                last_commit_idx
+                            );
+                        }
                     }
                 }
-            } 
+            }
 
             drain_commit_queue()?;
 
@@ -922,9 +933,12 @@ where
                         cvar.notify_one();
                     }
 
+                    SchedulerTask::Retry
+                },
+                SchedulerTask::Retry => {
+                    /*println!("need to retry"); */
                     scheduler.next_task()
                 },
-                SchedulerTask::Retry => { /*println!("need to retry"); */ scheduler.next_task() }
                 SchedulerTask::Done => {
                     drain_commit_queue()?;
                     break Ok(());

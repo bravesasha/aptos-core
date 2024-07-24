@@ -569,8 +569,6 @@ impl Scheduler {
 
         self.wake_dependencies_after_execution(txn_idx)?;
 
-
-
         let (cur_val_idx, mut cur_wave) =
             Self::unpack_validation_idx(self.validation_idx.load(Ordering::Acquire));
 
@@ -600,8 +598,7 @@ impl Scheduler {
                     incarnation,
                     cur_wave,
                 ));
-            }
-            else {
+            } else {
                 //this is the same as call to update_on_validation, but validity is guaranteed
                 //self.finish_validation(txn_idx, cur_wave);
                 validation_status.maybe_max_validated_wave = Some(cur_wave);
@@ -633,31 +630,36 @@ impl Scheduler {
     ) -> Option<bool> {
         match &mut **status {
             ExecutionStatus::Executing(incarnation, _, ref mut flag)
-            | ExecutionStatus::ReadyToWakeUp(incarnation, _, ref mut flag) if (expected_incarnation.is_none() || *incarnation == expected_incarnation.unwrap()) => match flag {
-                ExecutingFlag::Main => unreachable!("Should never be Main after Fallback"),
-                ExecutingFlag::Fallback => {
-                    *flag = ExecutingFlag::Writing;
-                    // In the fallback, no validation needed.
-                    Some(true)
-                },
-                ExecutingFlag::Writing => None,
+            | ExecutionStatus::ReadyToWakeUp(incarnation, _, ref mut flag)
+                if (expected_incarnation.is_none()
+                    || *incarnation == expected_incarnation.unwrap()) =>
+            {
+                match flag {
+                    ExecutingFlag::Main => unreachable!("Should never be Main after Fallback"),
+                    ExecutingFlag::Fallback => {
+                        *flag = ExecutingFlag::Writing;
+                        // In the fallback, no validation needed.
+                        Some(true)
+                    },
+                    ExecutingFlag::Writing => None,
+                }
             },
-            ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
-            ExecutionStatus::Aborting(_) => {
+            ExecutionStatus::Suspended(_, _)
+            | ExecutionStatus::ReadyToExecute(_)
+            | ExecutionStatus::Aborting(_) => {
                 // All dependencies should be committed (caller invariant), can not be suspended
                 // neither can it be aborted, since we know that it can not fail validation
                 // Since we are inside fallback, status can not go back to ReadyToExecute
-                //  
+                //
                 unreachable!("May not be suspended, Aborting or ReadyToExecute");
             },
-            ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) | 
-            ExecutionStatus::ExecutionHalted => {
+            ExecutionStatus::Committed(_)
+            | ExecutionStatus::Executed(_)
+            | ExecutionStatus::ExecutionHalted => {
                 // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
                 None
             },
-            _ => {
-                None
-            }
+            _ => None,
         }
     }
 
@@ -669,7 +671,7 @@ impl Scheduler {
         maybe_validation_f: Option<F>,
     ) -> Option<bool>
     where
-        F: Fn() -> bool
+        F: Fn() -> bool,
     {
         let mut status: parking_lot::lock_api::RwLockWriteGuard<
             parking_lot::RawRwLock,
@@ -691,7 +693,10 @@ impl Scheduler {
                             drop(status);
                             if validation_f() {
                                 let mut status = self.txn_status[txn_idx as usize].0.write();
-                                self.try_set_writing_from_fallback(&mut status, Some(old_incarnation))
+                                self.try_set_writing_from_fallback(
+                                    &mut status,
+                                    Some(old_incarnation),
+                                )
                             } else {
                                 None
                             }
@@ -699,13 +704,14 @@ impl Scheduler {
                         ExecutingFlag::Writing => {
                             println!("lost writing, inside set executionflag, idx={}", txn_idx);
                             None
-                        }
+                        },
                     },
-                    ExecutionStatus::Suspended(_, _) | ExecutionStatus::ReadyToExecute(_) | 
-                    ExecutionStatus::Aborting(_) => {
+                    ExecutionStatus::Suspended(_, _)
+                    | ExecutionStatus::ReadyToExecute(_)
+                    | ExecutionStatus::Aborting(_) => {
                         // This function is called either by transaction which is ready to be written => can not be suspended
-                        // or transaction after commited one => All dependencies should be committed 
-                        // which starts from Executed/ReadyToWakeUp status, hence the original (main) transaction should never 
+                        // or transaction after commited one => All dependencies should be committed
+                        // which starts from Executed/ReadyToWakeUp status, hence the original (main) transaction should never
                         // get suspended once it is fallback is called
                         // for the same reason it can not be ReadyToExecute or Aborting
                         unreachable!("May not be Suspended, Aborting or ReadyToExecute");
@@ -721,20 +727,21 @@ impl Scheduler {
                     ExecutionStatus::ExecutionHalted => {
                         // Transaction is Commited, Executed/about to be Committed, or Execution is Halted
                         println!("saw execution halted, idx={}", txn_idx);
+
                         None
-                    }
+                    },
                 }
             },
             None => {
                 // Already inside fallback, no need to revalidate
                 self.try_set_writing_from_fallback(&mut status, None)
-            }    
+            },
         }
     }
 
     // the function is called by transaction after commmitted one.
-    // In case transaction is already being executed 
-    // or is ready to be executed after getting back from susspend to ReadyToWakeUp 
+    // In case transaction is already being executed
+    // or is ready to be executed after getting back from susspend to ReadyToWakeUp
     // we try to set flag from Main to Fallback, to signal that transaction is candidate for a next commit
     pub(crate) fn try_fallback(&self, txn_idx: TxnIndex) -> Option<Incarnation> {
         if txn_idx >= self.num_txns {
@@ -755,18 +762,21 @@ impl Scheduler {
                 Some(*incarnation)
             },
             ExecutionStatus::Suspended(_, _) => {
-                // All dependencies should be committed 
+                // All dependencies should be committed
                 // => transaction could move from Suspended to ReadyToWakeUp => Executing => Executed => Aborting/Committed
                 // or finally execution should be halted, but it should never be suspended
                 unreachable!("May not be suspended");
             },
-            ExecutionStatus::Aborting(_) | ExecutionStatus::Committed(_) | ExecutionStatus::Executed(_) |
-            ExecutionStatus::ReadyToExecute(_) | ExecutionStatus::ExecutionHalted => {
+            ExecutionStatus::Aborting(_)
+            | ExecutionStatus::Committed(_)
+            | ExecutionStatus::Executed(_)
+            | ExecutionStatus::ReadyToExecute(_)
+            | ExecutionStatus::ExecutionHalted => {
                 // if execution is halted, or transaction already committed/executed no need to fallback
                 // otherwise we know that transaction will be eventually executed
                 // => no need to fallback either
                 None
-            }
+            },
         }
     }
 
@@ -865,6 +875,10 @@ impl TWaitForDependency for Scheduler {
             ));
         }
 
+        println!(
+            "transaction idx={}, waiting for transaction={}",
+            txn_idx, dep_txn_idx
+        );
         // Note: Could pre-check that txn dep_txn_idx isn't in an executed state, but the caller
         // usually has just observed the read dependency.
 
@@ -1162,13 +1176,13 @@ impl Scheduler {
     /// The caller must ensure that the transaction is in the Suspended state.
     fn resume(&self, txn_idx: TxnIndex) -> Result<(), PanicError> {
         let mut status = self.txn_status[txn_idx as usize].0.write();
-
         match &*status {
             ExecutionStatus::Suspended(incarnation, dep_condvar) => {
+                println!("resumed transaction={}", txn_idx);
                 *status = ExecutionStatus::ReadyToWakeUp(
                     *incarnation,
                     dep_condvar.clone(),
-                    ExecutingFlag::Main, // IMPORTANT: should not commited state, so should be safe to start with Main
+                    ExecutingFlag::Main, // IMPORTANT: Fallback should never be suspanded
                 );
                 Ok(())
             },
@@ -1188,19 +1202,18 @@ impl Scheduler {
     ) -> Result<(), PanicError> {
         let mut status = self.txn_status[txn_idx as usize].0.write();
         match *status {
-            ExecutionStatus::Executing(stored_incarnation, _, _) 
+            ExecutionStatus::Executing(stored_incarnation, _, _)
                 if stored_incarnation == incarnation =>
             {
                 *status = ExecutionStatus::Executed(incarnation);
                 Ok(())
             },
-            ExecutionStatus::ReadyToWakeUp(_, ref mut condvar, _) =>
-            {
+            ExecutionStatus::ReadyToWakeUp(_, ref mut condvar, _) => {
                 {
                     let (lock, cvar) = &**condvar;
                     // Mark dependency resolved.
                     let mut lock = lock.lock();
-                    *lock = DependencyStatus::Resolved;
+                    *lock = DependencyStatus::ExecutionHalted;
                     // Wake up the process waiting for dependency.
                     cvar.notify_one();
                 }
@@ -1214,10 +1227,10 @@ impl Scheduler {
             _ => {
                 println!("error due executed status, idx={}", txn_idx);
                 Err(code_invariant_error(format!(
-                "Expected Executing incarnation {incarnation}, got {:?}",
-                &*status,
-            )))
-            }
+                    "Expected Executing incarnation {incarnation}, got {:?}",
+                    &*status,
+                )))
+            },
         }
     }
 
