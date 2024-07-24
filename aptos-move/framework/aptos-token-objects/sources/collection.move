@@ -296,9 +296,6 @@ module aptos_token_objects::collection {
             royalty::init(&constructor_ref, option::extract(&mut royalty))
         };
 
-        let transfer_ref = object::generate_transfer_ref(&constructor_ref);
-        object::disable_ungated_transfer(&transfer_ref);
-
         constructor_ref
     }
 
@@ -750,7 +747,6 @@ module aptos_token_objects::collection {
     }
 
     #[test(creator = @0x123, trader = @0x456)]
-    #[expected_failure(abort_code = 0x50003, location = aptos_framework::object)]
     entry fun test_create_and_transfer(creator: &signer, trader: &signer) {
         let creator_address = signer::address_of(creator);
         let collection_name = string::utf8(b"collection name");
@@ -760,6 +756,7 @@ module aptos_token_objects::collection {
             create_collection_address(&creator_address, &collection_name),
         );
         assert!(object::owner(collection) == creator_address, 1);
+        // Transferring collections is allowed
         object::transfer(creator, collection, signer::address_of(trader));
     }
 
