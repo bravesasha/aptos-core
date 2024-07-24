@@ -18,12 +18,10 @@ use aptos_types::{
     account_address::AccountAddress, transaction::SignedTransaction,
     validator_verifier::ValidatorVerifier, vm_status::DiscardedVMStatus, PeerId,
 };
-use futures::future::Lazy;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    backtrace,
     collections::HashSet,
     fmt::{self, Write},
     sync::Arc,

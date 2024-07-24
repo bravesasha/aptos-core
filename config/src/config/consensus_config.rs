@@ -158,9 +158,9 @@ impl Default for ConsensusConfig {
             max_sending_block_unique_txns: MAX_SENDING_BLOCK_UNIQUE_TXNS,
             max_sending_block_bytes: 3 * 1024 * 1024, // 3MB
             max_receiving_block_txns: *MAX_RECEIVING_BLOCK_TXNS,
-            max_sending_inline_txns: 100,
-            max_sending_inline_bytes: 200 * 1024,       // 200 KB
-            max_receiving_block_bytes: 6 * 1024 * 1024, // 6MB
+            max_sending_inline_txns: MAX_SENDING_BLOCK_TXNS,
+            max_sending_inline_bytes: 3 * 1024 * 1024, // 3 MB
+            max_receiving_block_bytes: 6 * 1024 * 1024,              // 6MB
             max_pruned_blocks_in_mem: 100,
             mempool_executed_txn_timeout_ms: 1000,
             mempool_txn_pull_timeout_ms: 1000,

@@ -21,7 +21,6 @@ use futures::StreamExt;
 use futures_channel::mpsc::Receiver;
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
-    cmp::min,
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
@@ -236,51 +235,42 @@ impl ProofManager {
                 counters::PROOF_QUEUE_FULLY_UTILIZED
                     .observe(if proof_queue_fully_utilized { 1.0 } else { 0.0 });
 
-                let mut inline_block: Vec<(BatchInfo, Vec<SignedTransaction>)> = vec![];
                 let cur_all_txns: u64 = proof_block.iter().map(|p| p.num_txns()).sum();
                 let cur_bytes: u64 = proof_block.iter().map(|p| p.num_bytes()).sum();
 
-                if self.allow_batches_without_pos_in_proposal && proof_queue_fully_utilized {
-                    inline_block = self.batch_queue.pull_batches(
-                        min(
-                            min(
-                                max_txns.saturating_sub(cur_all_txns),
-                                max_txns_after_filtering.saturating_sub(cur_unique_txns),
-                            ),
-                            max_inline_txns,
-                        ),
-                        min(max_bytes - cur_bytes, max_inline_bytes),
-                        excluded_batches
-                            .iter()
-                            .cloned()
-                            .chain(proof_block.iter().map(|proof| proof.info().clone()))
-                            .collect(),
-                    );
-                }
+                let inline_block = self.batch_queue.pull_batches(
+                    max_inline_txns,
+                    max_inline_bytes,
+                    excluded_batches
+                        .iter()
+                        .cloned()
+                        .chain(proof_block.iter().map(|proof| proof.info().clone()))
+                        .collect(),
+                );
                 let inline_txns = inline_block
                     .iter()
                     .map(|(_, txns)| txns.len())
                     .sum::<usize>();
-                counters::NUM_INLINE_BATCHES.observe(inline_block.len() as f64);
+                let batch_infos: Vec<&BatchInfo> =
+                    inline_block.iter().map(|(info, _)| info).collect();
+
+                counters::NUM_INLINE_BATCHES.observe(batch_infos.len() as f64);
                 counters::NUM_INLINE_TXNS.observe(inline_txns as f64);
 
                 let res = GetPayloadResponse::GetPayloadResponse(
-                    if proof_block.is_empty() && inline_block.is_empty() {
+                    if proof_block.is_empty() && batch_infos.is_empty() {
                         Payload::empty(true, self.allow_batches_without_pos_in_proposal)
-                    } else if inline_block.is_empty() {
-                        trace!(
-                            "QS: GetBlockRequest excluded len {}, block len {}",
-                            excluded_batches.len(),
-                            proof_block.len()
-                        );
-                        Payload::InQuorumStore(ProofWithData::new(proof_block))
                     } else {
                         trace!(
                             "QS: GetBlockRequest excluded len {}, block len {}, inline len {}",
                             excluded_batches.len(),
                             proof_block.len(),
-                            inline_block.len()
+                            batch_infos.len()
                         );
+                        // Payload::OptQuorumStore(
+                        //     LazyBatchSet::new(batch_infos),
+                        //     ProofWithData::new(proof_block),
+                        // )
                         Payload::QuorumStoreInlineHybrid(
                             inline_block,
                             ProofWithData::new(proof_block),
