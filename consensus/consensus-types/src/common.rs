@@ -6,6 +6,7 @@ use crate::{
     payload::OptQuorumStorePayload,
     proof_of_store::{BatchInfo, ProofCache, ProofOfStore},
 };
+use anyhow::bail;
 use aptos_crypto::{
     hash::{CryptoHash, CryptoHasher},
     HashValue,
@@ -477,7 +478,9 @@ impl Payload {
             },
             (true, Payload::OptQuorumStore(opt_quorum_store)) => {
                 let proof_with_data = opt_quorum_store.proof_with_data();
-                Self::verify_with_cache(&proof_with_data.pointer, validator, proof_cache)?;
+                Self::verify_with_cache(&proof_with_data.batch_summary, validator, proof_cache)?;
+                // TODO(ibalajiarun): Remove this when ready to support OptQuorumStore.
+                bail!("OptQuorumStore is not supported yet.");
                 Ok(())
             },
             (_, _) => Err(anyhow::anyhow!(
@@ -630,10 +633,10 @@ impl From<&Vec<&Payload>> for PayloadFilter {
                         error!("DirectMempool payload in InQuorumStore filter");
                     },
                     Payload::OptQuorumStore(opt_qs_payload) => {
-                        for batch_info in &opt_qs_payload.opt_batches().pointer {
+                        for batch_info in &opt_qs_payload.opt_batches().batch_summary {
                             exclude_proofs.insert(batch_info.clone());
                         }
-                        for proof in &opt_qs_payload.proof_with_data().pointer {
+                        for proof in &opt_qs_payload.proof_with_data().batch_summary {
                             exclude_proofs.insert(proof.info().clone());
                         }
                     },
