@@ -695,6 +695,9 @@ impl CompiledPackage {
                     compile_test_code: flags.keep_testing_functions(),
                     ..Default::default()
                 };
+                for exp in &config.experiments {
+                    options = options.set_experiment(exp, true)
+                }
                 options = options.set_experiment(Experiment::ATTACH_COMPILED_MODULE, true);
                 compiler_driver_v2(options)?
             },

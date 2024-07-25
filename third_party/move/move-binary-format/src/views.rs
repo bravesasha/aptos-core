@@ -383,6 +383,15 @@ impl<'a, T: ModuleAccess> StructDefinitionView<'a, T> {
     pub fn name(&self) -> &'a IdentStr {
         self.struct_handle_view.name()
     }
+
+    pub fn variant_count(&self) -> usize {
+        self.struct_def.field_information.variant_count()
+    }
+
+    pub fn variant_name(&self, idx: VariantIndex) -> &IdentStr {
+        self.module
+            .identifier_at(self.struct_def.field_information.variants()[idx as usize].name)
+    }
 }
 
 pub struct FieldDefinitionView<'a, T> {

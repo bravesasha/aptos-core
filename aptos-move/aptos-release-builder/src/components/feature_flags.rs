@@ -122,6 +122,9 @@ pub enum FeatureFlag {
     LimitVMTypeSize,
     AbortIfMultisigPayloadMismatch,
     DisallowUserNative,
+    CompatibilityCheckerV2,
+    EnumTypes,
+    ResourceAccessControl,
 }
 
 fn generate_features_blob(writer: &CodeWriter, data: &[u64]) {
@@ -318,6 +321,9 @@ impl From<FeatureFlag> for AptosFeatureFlag {
                 AptosFeatureFlag::ABORT_IF_MULTISIG_PAYLOAD_MISMATCH
             },
             FeatureFlag::DisallowUserNative => AptosFeatureFlag::DISALLOW_USER_NATIVES,
+            FeatureFlag::CompatibilityCheckerV2 => AptosFeatureFlag::COMPATIBILITY_CHECKER_V2,
+            FeatureFlag::EnumTypes => AptosFeatureFlag::ENUM_TYPES,
+            FeatureFlag::ResourceAccessControl => AptosFeatureFlag::RESOURCE_ACCESS_CONTROL,
         }
     }
 }
@@ -443,6 +449,9 @@ impl From<AptosFeatureFlag> for FeatureFlag {
                 FeatureFlag::AbortIfMultisigPayloadMismatch
             },
             AptosFeatureFlag::DISALLOW_USER_NATIVES => FeatureFlag::DisallowUserNative,
+            AptosFeatureFlag::COMPATIBILITY_CHECKER_V2 => FeatureFlag::CompatibilityCheckerV2,
+            AptosFeatureFlag::ENUM_TYPES => FeatureFlag::EnumTypes,
+            AptosFeatureFlag::RESOURCE_ACCESS_CONTROL => FeatureFlag::ResourceAccessControl,
         }
     }
 }

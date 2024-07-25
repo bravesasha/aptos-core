@@ -26,6 +26,7 @@ pub struct VMConfig {
     pub delayed_field_optimization_enabled: bool,
     pub ty_builder: TypeBuilder,
     pub disallow_dispatch_for_native: bool,
+    pub compatibility_checker_v2: bool,
 }
 
 impl Default for VMConfig {
@@ -43,6 +44,7 @@ impl Default for VMConfig {
             delayed_field_optimization_enabled: false,
             ty_builder: TypeBuilder::with_limits(128, 20),
             disallow_dispatch_for_native: true,
+            compatibility_checker_v2: true,
         }
     }
 }

@@ -95,6 +95,8 @@ pub struct BuildOptions {
     pub check_test_code: bool,
     #[clap(skip)]
     pub known_attributes: BTreeSet<String>,
+    #[clap(skip)]
+    pub experiments: Vec<String>,
 }
 
 // Because named_addresses has no parser, we can't use clap's default impl. This must be aligned
@@ -121,7 +123,23 @@ impl Default for BuildOptions {
             skip_attribute_checks: false,
             check_test_code: false,
             known_attributes: extended_checks::get_all_attribute_names().clone(),
+            experiments: vec![],
         }
+    }
+}
+
+impl BuildOptions {
+    pub fn move_2() -> Self {
+        BuildOptions {
+            language_version: Some(LanguageVersion::V2_0),
+            compiler_version: Some(CompilerVersion::V2_0),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_experiment(mut self, exp: &str) -> Self {
+        self.experiments.push(exp.to_string());
+        self
     }
 }
 
@@ -143,6 +161,7 @@ pub fn build_model(
     language_version: Option<LanguageVersion>,
     skip_attribute_checks: bool,
     known_attributes: BTreeSet<String>,
+    experiments: Vec<String>,
 ) -> anyhow::Result<GlobalEnv> {
     let build_config = BuildConfig {
         dev_mode,
@@ -164,6 +183,7 @@ pub fn build_model(
             language_version,
             skip_attribute_checks,
             known_attributes,
+            experiments,
         },
     };
     let compiler_version = compiler_version.unwrap_or_default();
@@ -208,6 +228,7 @@ impl BuiltPackage {
                 language_version,
                 skip_attribute_checks,
                 known_attributes: options.known_attributes.clone(),
+                experiments: options.experiments.clone(),
             },
         };
 
